@@ -1,7 +1,7 @@
 // CogMemory MCP — Smoke test script
 // Runs all tools against a temporary database to verify basic functionality.
 
-import { resolve, join } from "node:path";
+import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
