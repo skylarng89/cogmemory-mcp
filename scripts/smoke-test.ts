@@ -255,6 +255,45 @@ function run() {
     .all("%typescript%");
   assert(recallErrs.length > 0, "recall finds errors by tag");
 
+  // FTS5 full-text search
+  const ftsResults = db
+    .prepare(
+      "SELECT rd.source, rd.doc_id FROM recall_fts fts JOIN recall_docs rd ON rd.id = fts.rowid WHERE recall_fts MATCH ?",
+    )
+    .all("SQLite");
+  assert(
+    ftsResults.length > 0,
+    "FTS5 MATCH finds documents containing 'SQLite'",
+  );
+
+  const recallDocsCount = db
+    .prepare("SELECT COUNT(*) as cnt FROM recall_docs")
+    .get() as { cnt: number };
+  assert(recallDocsCount.cnt > 0, "recall_docs populated by triggers");
+
+  // FTS5 trigger: insert a new decision and verify it appears in recall_fts
+  db.prepare(
+    "INSERT INTO decisions (title, rationale, tags) VALUES (?, ?, ?)",
+  ).run("FTS5 trigger test", "Verifying automatic indexing", "fts5,test");
+  const ftsNew = db
+    .prepare(
+      "SELECT rd.source, rd.doc_id FROM recall_fts fts JOIN recall_docs rd ON rd.id = fts.rowid WHERE recall_fts MATCH ?",
+    )
+    .all("trigger test");
+  assert(ftsNew.length > 0, "FTS5 triggers auto-index new decisions");
+
+  // FTS5 trigger: delete and verify removal
+  db.prepare("DELETE FROM decisions WHERE title = ?").run("FTS5 trigger test");
+  const ftsAfterDelete = db
+    .prepare(
+      "SELECT rd.source, rd.doc_id FROM recall_fts fts JOIN recall_docs rd ON rd.id = fts.rowid WHERE recall_fts MATCH ?",
+    )
+    .all("trigger test");
+  assert(
+    ftsAfterDelete.length === 0,
+    "FTS5 triggers auto-remove deleted decisions",
+  );
+
   // ── Cleanup ────────────────────────────────────────────
   db.close();
   rmSync(tmpDir, { recursive: true, force: true });

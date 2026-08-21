@@ -70,7 +70,7 @@ export const RecallSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Text to search for (LIKE match across title/description/summary)",
+      'Text to search for using FTS5 (supports AND/OR/NOT, phrase "exact match", prefix tr*',
     ),
   tags: z.string().optional().describe("Comma-separated tags to filter by"),
   session_id: z.number().int().optional().describe("Filter by session ID"),
@@ -325,111 +325,150 @@ export function registerMemoryTools(
       const lim = limit ?? 20;
       const results: Record<string, unknown[]> = {};
 
-      // Build WHERE clauses
-      const textLike = text ? `%${text}%` : null;
-      const tagsLike = tags ? `%${tags}%` : null;
+      if (text) {
+        // FTS5 full-text search — joins recall_fts → recall_docs → source table
+        const sourceConfigs = [
+          {
+            key: "decisions",
+            table: "decisions",
+            alias: "d",
+            hasSession: true,
+            hasTags: true,
+          },
+          {
+            key: "conventions",
+            table: "conventions",
+            alias: "c",
+            hasSession: false,
+            hasTags: true,
+          },
+          {
+            key: "errors",
+            table: "errors",
+            alias: "e",
+            hasSession: true,
+            hasTags: true,
+          },
+          {
+            key: "changelog",
+            table: "changelog",
+            alias: "ch",
+            hasSession: true,
+            hasTags: false,
+          },
+        ];
 
-      // Decisions
-      const decisionConds: string[] = [];
-      const decisionParams: unknown[] = [];
-      if (textLike) {
-        decisionConds.push("(title LIKE ? OR rationale LIKE ?)");
-        decisionParams.push(textLike, textLike);
-      }
-      if (tagsLike) {
-        decisionConds.push("tags LIKE ?");
-        decisionParams.push(tagsLike);
-      }
-      if (session_id !== undefined) {
-        decisionConds.push("session_id = ?");
-        decisionParams.push(session_id);
-      }
-      if (since) {
-        decisionConds.push("created_at >= ?");
-        decisionParams.push(since);
-      }
-      const decisionWhere =
-        decisionConds.length > 0 ? `WHERE ${decisionConds.join(" AND ")}` : "";
-      results.decisions = db
-        .prepare(
-          `SELECT * FROM decisions ${decisionWhere} ORDER BY created_at DESC LIMIT ?`,
-        )
-        .all(...decisionParams, lim);
+        for (const cfg of sourceConfigs) {
+          const conds: string[] = ["recall_fts MATCH ?", "rd.source = ?"];
+          const params: unknown[] = [text, cfg.key];
 
-      // Conventions
-      const convConds: string[] = [];
-      const convParams: unknown[] = [];
-      if (textLike) {
-        convConds.push("(key LIKE ? OR value LIKE ? OR description LIKE ?)");
-        convParams.push(textLike, textLike, textLike);
-      }
-      if (tagsLike) {
-        convConds.push("tags LIKE ?");
-        convParams.push(tagsLike);
-      }
-      if (since) {
-        convConds.push("created_at >= ?");
-        convParams.push(since);
-      }
-      const convWhere =
-        convConds.length > 0 ? `WHERE ${convConds.join(" AND ")}` : "";
-      results.conventions = db
-        .prepare(
-          `SELECT * FROM conventions ${convWhere} ORDER BY updated_at DESC LIMIT ?`,
-        )
-        .all(...convParams, lim);
+          if (since) {
+            conds.push("rd.created_at >= ?");
+            params.push(since);
+          }
+          if (cfg.hasTags && tags) {
+            conds.push(`${cfg.alias}.tags LIKE ?`);
+            params.push(`%${tags}%`);
+          }
+          if (cfg.hasSession && session_id !== undefined) {
+            conds.push(`${cfg.alias}.session_id = ?`);
+            params.push(session_id);
+          }
 
-      // Errors
-      const errConds: string[] = [];
-      const errParams: unknown[] = [];
-      if (textLike) {
-        errConds.push(
-          "(error_signature LIKE ? OR description LIKE ? OR resolution LIKE ?)",
-        );
-        errParams.push(textLike, textLike, textLike);
-      }
-      if (tagsLike) {
-        errConds.push("tags LIKE ?");
-        errParams.push(tagsLike);
-      }
-      if (session_id !== undefined) {
-        errConds.push("session_id = ?");
-        errParams.push(session_id);
-      }
-      if (since) {
-        errConds.push("created_at >= ?");
-        errParams.push(since);
-      }
-      const errWhere =
-        errConds.length > 0 ? `WHERE ${errConds.join(" AND ")}` : "";
-      results.errors = db
-        .prepare(
-          `SELECT * FROM errors ${errWhere} ORDER BY created_at DESC LIMIT ?`,
-        )
-        .all(...errParams, lim);
+          const sql = `
+            SELECT ${cfg.alias}.* FROM recall_fts fts
+            JOIN recall_docs rd ON rd.id = fts.rowid
+            JOIN ${cfg.table} ${cfg.alias} ON ${cfg.alias}.id = rd.doc_id
+            WHERE ${conds.join(" AND ")}
+            ORDER BY fts.rank
+            LIMIT ?
+          `;
+          results[cfg.key] = db.prepare(sql).all(...params, lim);
+        }
+      } else {
+        // No text — tag/session/date filters only (LIKE fallback)
+        const tagsLike = tags ? `%${tags}%` : null;
 
-      // Changelog
-      const changeConds: string[] = [];
-      const changeParams: unknown[] = [];
-      if (textLike) {
-        changeConds.push("summary LIKE ?");
-        changeParams.push(textLike);
+        const decConds: string[] = [];
+        const decParams: unknown[] = [];
+        if (tagsLike) {
+          decConds.push("tags LIKE ?");
+          decParams.push(tagsLike);
+        }
+        if (session_id !== undefined) {
+          decConds.push("session_id = ?");
+          decParams.push(session_id);
+        }
+        if (since) {
+          decConds.push("created_at >= ?");
+          decParams.push(since);
+        }
+        const decWhere =
+          decConds.length > 0 ? `WHERE ${decConds.join(" AND ")}` : "";
+        results.decisions = db
+          .prepare(
+            `SELECT * FROM decisions ${decWhere} ORDER BY created_at DESC LIMIT ?`,
+          )
+          .all(...decParams, lim);
+
+        const convConds: string[] = [];
+        const convParams: unknown[] = [];
+        if (tagsLike) {
+          convConds.push("tags LIKE ?");
+          convParams.push(tagsLike);
+        }
+        if (since) {
+          convConds.push("created_at >= ?");
+          convParams.push(since);
+        }
+        const convWhere =
+          convConds.length > 0 ? `WHERE ${convConds.join(" AND ")}` : "";
+        results.conventions = db
+          .prepare(
+            `SELECT * FROM conventions ${convWhere} ORDER BY updated_at DESC LIMIT ?`,
+          )
+          .all(...convParams, lim);
+
+        const errConds: string[] = [];
+        const errParams: unknown[] = [];
+        if (tagsLike) {
+          errConds.push("tags LIKE ?");
+          errParams.push(tagsLike);
+        }
+        if (session_id !== undefined) {
+          errConds.push("session_id = ?");
+          errParams.push(session_id);
+        }
+        if (since) {
+          errConds.push("created_at >= ?");
+          errParams.push(since);
+        }
+        const errWhere =
+          errConds.length > 0 ? `WHERE ${errConds.join(" AND ")}` : "";
+        results.errors = db
+          .prepare(
+            `SELECT * FROM errors ${errWhere} ORDER BY created_at DESC LIMIT ?`,
+          )
+          .all(...errParams, lim);
+
+        const changeConds: string[] = [];
+        const changeParams: unknown[] = [];
+        if (session_id !== undefined) {
+          changeConds.push("session_id = ?");
+          changeParams.push(session_id);
+        }
+        if (since) {
+          changeConds.push("created_at >= ?");
+          changeParams.push(since);
+        }
+        const changeWhere =
+          changeConds.length > 0 ? `WHERE ${changeConds.join(" AND ")}` : "";
+        results.changelog = db
+          .prepare(
+            `SELECT * FROM changelog ${changeWhere} ORDER BY created_at DESC LIMIT ?`,
+          )
+          .all(...changeParams, lim);
       }
-      if (session_id !== undefined) {
-        changeConds.push("session_id = ?");
-        changeParams.push(session_id);
-      }
-      if (since) {
-        changeConds.push("created_at >= ?");
-        changeParams.push(since);
-      }
-      const changeWhere =
-        changeConds.length > 0 ? `WHERE ${changeConds.join(" AND ")}` : "";
-      results.changelog = db
-        .prepare(
-          `SELECT * FROM changelog ${changeWhere} ORDER BY created_at DESC LIMIT ?`,
-        )
-        .all(...changeParams, lim);
 
       const totalResults =
         results.decisions.length +
