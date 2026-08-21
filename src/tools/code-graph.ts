@@ -6,6 +6,7 @@ import type Database from "better-sqlite3";
 import { walkFiles } from "../indexing/walker.js";
 import { analyzeFiles } from "../indexing/ts-analyzer.js";
 import { resolve } from "node:path";
+import { wrapHandler } from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -200,32 +201,94 @@ export function registerCodeGraphTools(
         "Look up a symbol by name, ID, or file path — returns its callers, callees, and imports (1-hop)",
       inputSchema: QueryCodeGraphSchema,
     },
-    async ({ symbol_name, symbol_id, file_path }) => {
-      let symbol: Record<string, unknown> | undefined;
+    wrapHandler(
+      "query_code_graph",
+      async ({ symbol_name, symbol_id, file_path }) => {
+        let symbol: Record<string, unknown> | undefined;
 
-      if (symbol_id !== undefined) {
-        symbol = db
-          .prepare("SELECT * FROM symbols WHERE id = ?")
-          .get(symbol_id) as Record<string, unknown> | undefined;
-      } else if (symbol_name) {
-        // Prefer non-file symbols, then most recent
-        symbol = db
-          .prepare(
-            `SELECT * FROM symbols WHERE symbol_name = ? AND symbol_type != 'file' ORDER BY updated_at DESC LIMIT 1`,
-          )
-          .get(symbol_name) as Record<string, unknown> | undefined;
+        if (symbol_id !== undefined) {
+          symbol = db
+            .prepare("SELECT * FROM symbols WHERE id = ?")
+            .get(symbol_id) as Record<string, unknown> | undefined;
+        } else if (symbol_name) {
+          // Prefer non-file symbols, then most recent
+          symbol = db
+            .prepare(
+              `SELECT * FROM symbols WHERE symbol_name = ? AND symbol_type != 'file' ORDER BY updated_at DESC LIMIT 1`,
+            )
+            .get(symbol_name) as Record<string, unknown> | undefined;
+
+          if (!symbol) {
+            symbol = db
+              .prepare(`SELECT * FROM symbols WHERE symbol_name = ? LIMIT 1`)
+              .get(symbol_name) as Record<string, unknown> | undefined;
+          }
+        } else if (file_path) {
+          const symbols = db
+            .prepare(
+              "SELECT * FROM symbols WHERE file_path = ? ORDER BY start_line",
+            )
+            .all(file_path);
+
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  success: true,
+                  file_path,
+                  symbols,
+                }),
+              },
+            ],
+          };
+        }
 
         if (!symbol) {
-          symbol = db
-            .prepare(`SELECT * FROM symbols WHERE symbol_name = ? LIMIT 1`)
-            .get(symbol_name) as Record<string, unknown> | undefined;
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  success: false,
+                  message: "Symbol not found",
+                }),
+              },
+            ],
+          };
         }
-      } else if (file_path) {
-        const symbols = db
+
+        const symId = symbol.id as number;
+
+        // Callers: edges where this symbol is the target
+        const callers = db
           .prepare(
-            "SELECT * FROM symbols WHERE file_path = ? ORDER BY start_line",
+            `SELECT s.* FROM edges e
+           JOIN symbols s ON e.from_symbol_id = s.id
+           WHERE e.to_symbol_id = ?
+           ORDER BY s.file_path, s.start_line`,
           )
-          .all(file_path);
+          .all(symId);
+
+        // Callees: edges where this symbol is the source
+        const callees = db
+          .prepare(
+            `SELECT s.* FROM edges e
+           JOIN symbols s ON e.to_symbol_id = s.id
+           WHERE e.from_symbol_id = ?
+           ORDER BY s.file_path, s.start_line`,
+          )
+          .all(symId);
+
+        // Imports: edges of type 'imports' where this symbol is the source
+        const imports = db
+          .prepare(
+            `SELECT s.*, e.edge_type FROM edges e
+           JOIN symbols s ON e.to_symbol_id = s.id
+           WHERE e.from_symbol_id = ? AND e.edge_type = 'imports'
+           ORDER BY s.file_path`,
+          )
+          .all(symId);
 
         return {
           content: [
@@ -233,74 +296,15 @@ export function registerCodeGraphTools(
               type: "text" as const,
               text: JSON.stringify({
                 success: true,
-                file_path,
-                symbols,
+                symbol,
+                callers,
+                callees,
+                imports,
               }),
             },
           ],
         };
-      }
-
-      if (!symbol) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: false,
-                message: "Symbol not found",
-              }),
-            },
-          ],
-        };
-      }
-
-      const symId = symbol.id as number;
-
-      // Callers: edges where this symbol is the target
-      const callers = db
-        .prepare(
-          `SELECT s.* FROM edges e
-           JOIN symbols s ON e.from_symbol_id = s.id
-           WHERE e.to_symbol_id = ?
-           ORDER BY s.file_path, s.start_line`,
-        )
-        .all(symId);
-
-      // Callees: edges where this symbol is the source
-      const callees = db
-        .prepare(
-          `SELECT s.* FROM edges e
-           JOIN symbols s ON e.to_symbol_id = s.id
-           WHERE e.from_symbol_id = ?
-           ORDER BY s.file_path, s.start_line`,
-        )
-        .all(symId);
-
-      // Imports: edges of type 'imports' where this symbol is the source
-      const imports = db
-        .prepare(
-          `SELECT s.*, e.edge_type FROM edges e
-           JOIN symbols s ON e.to_symbol_id = s.id
-           WHERE e.from_symbol_id = ? AND e.edge_type = 'imports'
-           ORDER BY s.file_path`,
-        )
-        .all(symId);
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-              symbol,
-              callers,
-              callees,
-              imports,
-            }),
-          },
-        ],
-      };
-    },
+      },
+    ),
   );
 }

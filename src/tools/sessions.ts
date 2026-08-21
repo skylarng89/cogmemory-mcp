@@ -3,6 +3,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
+import { wrapHandler } from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -33,7 +34,7 @@ export function registerSessionTools(
       description: "Begin a new work session (returns session ID)",
       inputSchema: StartSessionSchema,
     },
-    async () => {
+    wrapHandler("start_session", async () => {
       const stmt = db.prepare("INSERT INTO sessions DEFAULT VALUES");
       const result = stmt.run();
       return {
@@ -48,7 +49,7 @@ export function registerSessionTools(
           },
         ],
       };
-    },
+    }),
   );
 
   // ── end_session ──
@@ -58,7 +59,7 @@ export function registerSessionTools(
       description: "Close a work session and optionally store a summary",
       inputSchema: EndSessionSchema,
     },
-    async ({ id, summary }) => {
+    wrapHandler("end_session", async ({ id, summary }) => {
       const stmt = db.prepare(`
         UPDATE sessions
         SET ended_at = datetime('now'), summary = ?
@@ -89,7 +90,7 @@ export function registerSessionTools(
           },
         ],
       };
-    },
+    }),
   );
 
   // ── get_session_summary ──
@@ -100,7 +101,7 @@ export function registerSessionTools(
         "Recall what happened in a previous session, including its decisions, errors, and changelog entries",
       inputSchema: GetSessionSummarySchema,
     },
-    async ({ id }) => {
+    wrapHandler("get_session_summary", async ({ id }) => {
       const session = db
         .prepare("SELECT * FROM sessions WHERE id = ?")
         .get(id) as Record<string, unknown> | undefined;
@@ -155,6 +156,6 @@ export function registerSessionTools(
           },
         ],
       };
-    },
+    }),
   );
 }
