@@ -1,4 +1,4 @@
-name: Publish Package
+name: Publish
 
 on:
   push:
@@ -9,8 +9,8 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write # create tags + releases
-  id-token: write # npm trusted publisher (OIDC)
+  contents: write # create tags
+  id-token: write # npm trusted publisher (OIDC) + MCP Registry OIDC
 
 jobs:
   publish:
@@ -59,7 +59,7 @@ jobs:
           echo "Detected bump: $BUMP"
           echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
 
-      - name: Bump version
+      - name: Bump version (local only — not committed)
         if: steps.bump.outputs.bump != 'none'
         id: version
         run: |
@@ -76,6 +76,7 @@ jobs:
           echo "Bumping $CURRENT → $NEW_VERSION"
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
+          # Patch package.json — never committed, only used for build + publish
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
@@ -83,6 +84,7 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
+          # Patch server.json — never committed, only used for build + publish
           node -e "
             const fs = require('fs');
             const srv = JSON.parse(fs.readFileSync('server.json', 'utf-8'));
@@ -99,15 +101,13 @@ jobs:
         if: steps.bump.outputs.bump != 'none'
         run: pnpm run smoke-test
 
-      - name: Commit version bump + tag
+      - name: Create tag
         if: steps.bump.outputs.bump != 'none'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json server.json
-          git commit -m "chore: release v${{ steps.version.outputs.version }}"
           git tag "v${{ steps.version.outputs.version }}"
-          git push origin main --follow-tags
+          git push origin "v${{ steps.version.outputs.version }}"
 
       - name: Publish to npm (Trusted Publisher)
         if: steps.bump.outputs.bump != 'none'
