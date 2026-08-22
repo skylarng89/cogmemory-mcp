@@ -306,5 +306,68 @@ export function migrate(db: Database.Database): void {
 
     -- Rebuild FTS index to ensure consistency
     INSERT INTO recall_fts(recall_fts) VALUES('rebuild');
+
+    -- ─── KNOWLEDGE GRAPH: FTS5 index ─────────────────────
+    CREATE TABLE IF NOT EXISTS kg_docs (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      source     TEXT NOT NULL,
+      doc_id     INTEGER NOT NULL,
+      body       TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(source, doc_id)
+    );
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS kg_fts USING fts5(
+      body,
+      content='kg_docs',
+      content_rowid='id'
+    );
+
+    -- kg_docs → kg_fts sync triggers
+    CREATE TRIGGER IF NOT EXISTS trg_kg_docs_ai AFTER INSERT ON kg_docs BEGIN
+      INSERT INTO kg_fts(rowid, body) VALUES (new.id, new.body);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_kg_docs_ad AFTER DELETE ON kg_docs BEGIN
+      INSERT INTO kg_fts(kg_fts, rowid, body) VALUES ('delete', old.id, old.body);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_kg_docs_au AFTER UPDATE ON kg_docs BEGIN
+      INSERT INTO kg_fts(kg_fts, rowid, body) VALUES ('delete', old.id, old.body);
+      INSERT INTO kg_fts(rowid, body) VALUES (new.id, new.body);
+    END;
+
+    -- entities → kg_docs sync triggers
+    CREATE TRIGGER IF NOT EXISTS trg_entities_fts_ai AFTER INSERT ON entities BEGIN
+      INSERT OR IGNORE INTO kg_docs(source, doc_id, body, created_at)
+      VALUES ('entities', NEW.id, NEW.name || ' ' || NEW.type, NEW.created_at);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_entities_fts_ad AFTER DELETE ON entities BEGIN
+      DELETE FROM kg_docs WHERE source = 'entities' AND doc_id = OLD.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_entities_fts_au AFTER UPDATE ON entities BEGIN
+      UPDATE kg_docs SET body = NEW.name || ' ' || NEW.type
+      WHERE source = 'entities' AND doc_id = OLD.id;
+    END;
+
+    -- observations → kg_docs sync triggers
+    CREATE TRIGGER IF NOT EXISTS trg_observations_fts_ai AFTER INSERT ON observations BEGIN
+      INSERT OR IGNORE INTO kg_docs(source, doc_id, body, created_at)
+      VALUES ('observations', NEW.id, NEW.content, NEW.created_at);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_observations_fts_ad AFTER DELETE ON observations BEGIN
+      DELETE FROM kg_docs WHERE source = 'observations' AND doc_id = OLD.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_observations_fts_au AFTER UPDATE ON observations BEGIN
+      UPDATE kg_docs SET body = NEW.content, created_at = NEW.created_at
+      WHERE source = 'observations' AND doc_id = OLD.id;
+    END;
+
+    -- Populate kg_docs from existing data
+    INSERT OR IGNORE INTO kg_docs(source, doc_id, body, created_at)
+      SELECT 'entities', id, name || ' ' || type, created_at FROM entities;
+    INSERT OR IGNORE INTO kg_docs(source, doc_id, body, created_at)
+      SELECT 'observations', id, content, created_at FROM observations;
+
+    -- Rebuild KG FTS index
+    INSERT INTO kg_fts(kg_fts) VALUES('rebuild');
   `);
 }
