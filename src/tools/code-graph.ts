@@ -3,7 +3,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { walkFiles } from "../indexing/walker.js";
+import { walkFilesWithMtime } from "../indexing/walker.js";
 import { analyzeFiles } from "../indexing/ts-analyzer.js";
 import { resolve } from "node:path";
 import { wrapHandler } from "./utils.js";
@@ -19,6 +19,10 @@ export const IndexCodebaseSchema = z.object({
     .array(z.string())
     .optional()
     .describe("File extensions to index (default: ['ts','tsx','js','jsx'])"),
+  full: z
+    .boolean()
+    .optional()
+    .describe("Force full re-index instead of incremental (default: false)"),
 });
 
 export const QueryCodeGraphSchema = z
@@ -56,18 +60,21 @@ export function registerCodeGraphTools(
     "index_codebase",
     {
       description:
-        "Walk the workspace and extract symbols + edges via ts-morph (JS/TS). Replaces previous index entirely.",
+        "Walk the workspace and extract symbols + edges via ts-morph (JS/TS). Incremental by default (only re-analyzes changed files); use full=true to force complete re-index.",
       inputSchema: IndexCodebaseSchema,
     },
-    async ({ root_dir, extensions }) => {
+    async ({ root_dir, extensions, full }) => {
       const targetDir = resolve(root_dir ?? workspaceRoot);
       const exts = extensions ?? ["ts", "tsx", "js", "jsx"];
 
       try {
-        // Step 1: Walk files
-        const files = walkFiles(targetDir, { extensions: exts });
+        // Step 1: Walk files with mtimes
+        const filesWithMtime = walkFilesWithMtime(targetDir, { extensions: exts });
+        const currentFiles = new Map(
+          filesWithMtime.map((f) => [f.path, f.mtime]),
+        );
 
-        if (files.length === 0) {
+        if (currentFiles.size === 0) {
           return {
             content: [
               {
@@ -84,82 +91,216 @@ export function registerCodeGraphTools(
           };
         }
 
-        // Step 2: Analyze
-        const result = analyzeFiles(files, targetDir);
+        // Step 2: Get stored file index
+        const storedIndex = db
+          .prepare("SELECT file_path, mtime_ms FROM file_index")
+          .all() as { file_path: string; mtime_ms: number }[];
+        const storedFiles = new Map(
+          storedIndex.map((f) => [f.file_path, f.mtime_ms]),
+        );
 
-        // Step 3: Clear existing index and re-insert
-        db.exec("DELETE FROM edges");
-        db.exec("DELETE FROM symbols");
+        // Step 3: Full re-index or incremental
+        const isFull = full || storedFiles.size === 0;
+        let filesToAnalyze: string[];
+        let deletedFiles: string[];
 
-        // Step 4: Insert symbols
-        const insertSymbol = db.prepare(`
-          INSERT INTO symbols (file_path, symbol_name, symbol_type, start_line, end_line)
-          VALUES (?, ?, ?, ?, ?)
-        `);
+        if (isFull) {
+          filesToAnalyze = [...currentFiles.keys()];
+          deletedFiles = [];
+          db.exec("DELETE FROM edges");
+          db.exec("DELETE FROM symbols");
+          db.exec("DELETE FROM file_index");
+        } else {
+          // Incremental: classify files by comparing mtimes
+          const newFiles: string[] = [];
+          const changedFiles: string[] = [];
 
-        const symbolIdMap = new Map<string, number>();
+          for (const [path, mtime] of currentFiles) {
+            const storedMtime = storedFiles.get(path);
+            if (storedMtime === undefined) {
+              newFiles.push(path);
+            } else if (storedMtime !== mtime) {
+              changedFiles.push(path);
+            }
+          }
 
-        const insertSymbols = db.transaction(() => {
-          for (const sym of result.symbols) {
-            const r = insertSymbol.run(
-              sym.file_path,
-              sym.symbol_name,
-              sym.symbol_type,
-              sym.start_line,
-              sym.end_line,
+          deletedFiles = [];
+          for (const [path] of storedFiles) {
+            if (!currentFiles.has(path)) {
+              deletedFiles.push(path);
+            }
+          }
+
+          filesToAnalyze = [...newFiles, ...changedFiles];
+
+          // Delete symbols for deleted + changed files (edges cascade via FK)
+          const filesToDelete = [...deletedFiles, ...changedFiles];
+          if (filesToDelete.length > 0) {
+            const deleteSymbols = db.prepare(
+              "DELETE FROM symbols WHERE file_path = ?",
             );
-            const id = r.lastInsertRowid as number;
-            const key = `${sym.file_path}:${sym.symbol_name}:${sym.start_line}`;
-            symbolIdMap.set(key, id);
+            const deleteFileIdx = db.prepare(
+              "DELETE FROM file_index WHERE file_path = ?",
+            );
+            db.transaction(() => {
+              for (const path of filesToDelete) {
+                deleteSymbols.run(path);
+                deleteFileIdx.run(path);
+              }
+            })();
           }
-        });
-        insertSymbols();
+        }
 
-        // Step 5: Insert edges
-        const insertEdge = db.prepare(`
-          INSERT INTO edges (from_symbol_id, to_symbol_id, edge_type)
-          VALUES (?, ?, ?)
-        `);
+        // Early return if nothing changed
+        if (filesToAnalyze.length === 0 && deletedFiles.length === 0) {
+          const symCount = (
+            db.prepare("SELECT COUNT(*) as cnt FROM symbols").get() as {
+              cnt: number;
+            }
+          ).cnt;
+          const edgeCount = (
+            db.prepare("SELECT COUNT(*) as cnt FROM edges").get() as {
+              cnt: number;
+            }
+          ).cnt;
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  success: true,
+                  message: "Index up to date \u2014 no changes detected",
+                  mode: "incremental",
+                  files: currentFiles.size,
+                  changed: 0,
+                  deleted: 0,
+                  symbols: symCount,
+                  edges: edgeCount,
+                }),
+              },
+            ],
+          };
+        }
 
-        let edgeCount = 0;
-        const insertEdges = db.transaction(() => {
-          for (const edge of result.edges) {
-            // Try to resolve symbol IDs
-            const fromKey = `${edge.from_file}:${edge.from_name}:${edge.from_start_line}`;
-            const toKey = `${edge.to_file}:${edge.to_name}:${edge.to_start_line}`;
+        // Build symbolIdMap from existing symbols (for cross-file edge resolution)
+        const symbolIdMap = new Map<string, number>();
+        if (!isFull) {
+          const existingSymbols = db
+            .prepare(
+              "SELECT id, file_path, symbol_name, start_line FROM symbols",
+            )
+            .all() as {
+            id: number;
+            file_path: string;
+            symbol_name: string;
+            start_line: number;
+          }[];
+          for (const sym of existingSymbols) {
+            symbolIdMap.set(
+              `${sym.file_path}:${sym.symbol_name}:${sym.start_line}`,
+              sym.id,
+            );
+          }
+        }
 
-            let fromId = symbolIdMap.get(fromKey);
-            let toId = symbolIdMap.get(toKey);
+        // Analyze new + changed files
+        let newSymbolCount = 0;
+        let newEdgeCount = 0;
 
-            // Fallback: try to find by name only
-            if (!fromId) {
-              for (const [key, id] of symbolIdMap) {
-                if (key.startsWith(`${edge.from_file}:${edge.from_name}:`)) {
-                  fromId = id;
-                  break;
+        if (filesToAnalyze.length > 0) {
+          const result = analyzeFiles(filesToAnalyze, targetDir);
+          newSymbolCount = result.symbols.length;
+
+          // Insert symbols
+          const insertSymbol = db.prepare(`
+            INSERT INTO symbols (file_path, symbol_name, symbol_type, start_line, end_line)
+            VALUES (?, ?, ?, ?, ?)
+          `);
+          db.transaction(() => {
+            for (const sym of result.symbols) {
+              const r = insertSymbol.run(
+                sym.file_path,
+                sym.symbol_name,
+                sym.symbol_type,
+                sym.start_line,
+                sym.end_line,
+              );
+              const id = r.lastInsertRowid as number;
+              symbolIdMap.set(
+                `${sym.file_path}:${sym.symbol_name}:${sym.start_line}`,
+                id,
+              );
+            }
+          })();
+
+          // Insert edges
+          const insertEdge = db.prepare(`
+            INSERT INTO edges (from_symbol_id, to_symbol_id, edge_type)
+            VALUES (?, ?, ?)
+          `);
+          db.transaction(() => {
+            for (const edge of result.edges) {
+              const fromKey = `${edge.from_file}:${edge.from_name}:${edge.from_start_line}`;
+              const toKey = `${edge.to_file}:${edge.to_name}:${edge.to_start_line}`;
+              let fromId = symbolIdMap.get(fromKey);
+              let toId = symbolIdMap.get(toKey);
+
+              if (!fromId) {
+                for (const [key, id] of symbolIdMap) {
+                  if (
+                    key.startsWith(`${edge.from_file}:${edge.from_name}:`)
+                  ) {
+                    fromId = id;
+                    break;
+                  }
+                }
+              }
+              if (!toId) {
+                for (const [key, id] of symbolIdMap) {
+                  if (key.startsWith(`${edge.to_file}:${edge.to_name}:`)) {
+                    toId = id;
+                    break;
+                  }
+                }
+              }
+
+              if (fromId && toId) {
+                try {
+                  insertEdge.run(fromId, toId, edge.edge_type);
+                  newEdgeCount++;
+                } catch {
+                  // Skip duplicate edges
                 }
               }
             }
-            if (!toId) {
-              for (const [key, id] of symbolIdMap) {
-                if (key.startsWith(`${edge.to_file}:${edge.to_name}:`)) {
-                  toId = id;
-                  break;
-                }
-              }
-            }
+          })();
 
-            if (fromId && toId) {
-              try {
-                insertEdge.run(fromId, toId, edge.edge_type);
-                edgeCount++;
-              } catch {
-                // Skip duplicate edges
-              }
+          // Update file_index for processed files
+          const upsertFileIndex = db.prepare(`
+            INSERT INTO file_index (file_path, mtime_ms, indexed_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(file_path) DO UPDATE SET
+              mtime_ms = excluded.mtime_ms,
+              indexed_at = datetime('now')
+          `);
+          db.transaction(() => {
+            for (const path of filesToAnalyze) {
+              upsertFileIndex.run(path, currentFiles.get(path)!);
             }
+          })();
+        }
+
+        // Get totals
+        const totalSymbols = (
+          db.prepare("SELECT COUNT(*) as cnt FROM symbols").get() as {
+            cnt: number;
           }
-        });
-        insertEdges();
+        ).cnt;
+        const totalEdges = (
+          db.prepare("SELECT COUNT(*) as cnt FROM edges").get() as {
+            cnt: number;
+          }
+        ).cnt;
 
         return {
           content: [
@@ -167,10 +308,17 @@ export function registerCodeGraphTools(
               type: "text" as const,
               text: JSON.stringify({
                 success: true,
-                message: `Indexed ${targetDir}`,
-                files: files.length,
-                symbols: result.symbols.length,
-                edges: edgeCount,
+                message: isFull
+                  ? `Full index of ${targetDir}`
+                  : `Incremental index of ${targetDir}`,
+                mode: isFull ? "full" : "incremental",
+                files: currentFiles.size,
+                analyzed: filesToAnalyze.length,
+                deleted: deletedFiles.length,
+                newSymbols: newSymbolCount,
+                newEdges: newEdgeCount,
+                totalSymbols,
+                totalEdges,
               }),
             },
           ],

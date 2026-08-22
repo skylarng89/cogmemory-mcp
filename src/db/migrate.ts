@@ -154,6 +154,13 @@ export function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_specs_entity ON specs(entity_id);
     CREATE INDEX IF NOT EXISTS idx_specs_title  ON specs(title);
 
+    -- ─── CODE GRAPH: file_index (mtime tracking for incremental indexing)
+    CREATE TABLE IF NOT EXISTS file_index (
+      file_path  TEXT PRIMARY KEY,
+      mtime_ms   INTEGER NOT NULL,
+      indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- ─── CODE GRAPH: symbols ──────────────────────────────
     CREATE TABLE IF NOT EXISTS symbols (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
