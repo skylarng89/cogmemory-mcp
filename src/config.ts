@@ -1,7 +1,7 @@
 // CogMemory MCP — Scope & path resolution
 
-import { existsSync, readFileSync, mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync, mkdirSync, statSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 
 export type Scope = "workspace" | "global";
@@ -9,6 +9,7 @@ export type Scope = "workspace" | "global";
 export interface Config {
   scope: Scope;
   dbPath: string;
+  workspaceRoot: string;
 }
 
 interface ConfigFile {
@@ -55,6 +56,7 @@ function buildWorkspaceConfig(workspaceRoot: string): Config {
   return {
     scope: "workspace",
     dbPath: join(dir, "memory.db"),
+    workspaceRoot,
   };
 }
 
@@ -64,26 +66,65 @@ function buildGlobalConfig(): Config {
   return {
     scope: "global",
     dbPath: join(dir, "global.db"),
+    workspaceRoot: homedir(),
   };
 }
 
+// ─── Workspace root helpers ───────────────────────────────
+
 /**
- * Determine the workspace root from argv or CWD.
- * Looks for a directory containing `.cogmemory/` or falls back to CWD.
+ * Walk up from a starting directory looking for `.cogmemory/`.
+ * Returns the directory containing it, or null if not found.
+ */
+function findCogmemoryDir(start: string): string | null {
+  let current = resolve(start);
+  const fsRoot = dirname(current);
+  while (current !== fsRoot) {
+    const candidate = join(current, ".cogmemory");
+    try {
+      if (existsSync(candidate) && statSync(candidate).isDirectory()) {
+        return current;
+      }
+    } catch {
+      // Continue searching upward
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return null;
+}
+
+/**
+ * Try to resolve and validate a path. Returns it if it exists, null otherwise.
+ */
+function tryPath(path: string, label: string): string | null {
+  const resolved = resolve(path);
+  if (existsSync(resolved)) return resolved;
+  console.error(
+    `Warning: ${label} path does not exist: ${resolved}, falling back`,
+  );
+  return null;
+}
+
+/**
+ * Determine the workspace root using the following priority:
+ * 1. `--workspace <path>` CLI argument
+ * 2. `COGMEMORY_WORKSPACE` environment variable
+ * 3. Walk up from CWD looking for a `.cogmemory/` directory
+ * 4. Fall back to CWD
  */
 export function resolveWorkspaceRoot(argv: string[]): string {
-  // Check if a workspace root was passed as an argument
-  const argIndex = argv.indexOf("--workspace");
-  if (argIndex !== -1 && argv[argIndex + 1]) {
-    return resolve(argv[argIndex + 1]);
+  const argIdx = argv.indexOf("--workspace");
+  if (argIdx !== -1 && argv[argIdx + 1]) {
+    const r = tryPath(argv[argIdx + 1], "--workspace");
+    if (r) return r;
   }
 
-  // Use COGMEMORY_WORKSPACE env var if set
-  const envWorkspace = process.env.COGMEMORY_WORKSPACE;
-  if (envWorkspace) {
-    return resolve(envWorkspace);
+  if (process.env.COGMEMORY_WORKSPACE) {
+    const r = tryPath(process.env.COGMEMORY_WORKSPACE, "COGMEMORY_WORKSPACE");
+    if (r) return r;
   }
 
-  // Default to CWD
-  return resolve(".");
+  return findCogmemoryDir(".") ?? resolve(".");
 }
