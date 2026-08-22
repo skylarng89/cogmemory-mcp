@@ -69,7 +69,9 @@ export function registerCodeGraphTools(
 
       try {
         // Step 1: Walk files with mtimes
-        const filesWithMtime = walkFilesWithMtime(targetDir, { extensions: exts });
+        const filesWithMtime = walkFilesWithMtime(targetDir, {
+          extensions: exts,
+        });
         const currentFiles = new Map(
           filesWithMtime.map((f) => [f.path, f.mtime]),
         );
@@ -247,9 +249,7 @@ export function registerCodeGraphTools(
 
               if (!fromId) {
                 for (const [key, id] of symbolIdMap) {
-                  if (
-                    key.startsWith(`${edge.from_file}:${edge.from_name}:`)
-                  ) {
+                  if (key.startsWith(`${edge.from_file}:${edge.from_name}:`)) {
                     fromId = id;
                     break;
                   }
