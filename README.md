@@ -51,9 +51,11 @@ pnpm run inspect
 CogMemory resolves scope in priority order:
 
 1. **`.cogmemory/config.json`** in workspace root:
+
    ```json
    { "scope": "global" }
    ```
+
 2. **Environment variable**: `COGMEMORY_SCOPE=global`
 3. **Default**: `workspace`
 
@@ -63,6 +65,83 @@ CogMemory resolves scope in priority order:
 | --------- | --------------------------------------- |
 | workspace | `<workspace_root>/.cogmemory/memory.db` |
 | global    | `~/.cogmemory/global.db`                |
+
+---
+
+## Workspace Resolution & Multi-Root Support
+
+CogMemory resolves the workspace root (where `.cogmemory/memory.db` lives) in this priority order:
+
+1. **`--workspace <path>`** CLI argument (highest priority)
+2. **`COGMEMORY_WORKSPACE`** environment variable
+3. **Walk up from CWD** looking for the nearest parent containing a `.cogmemory/` directory
+4. **Fallback to CWD**
+
+### Multi-Root VS Code Workspaces
+
+In a VS Code multi-root workspace, each folder is a separate workspace root. CogMemory handles this:
+
+- **Single-root** — Works automatically. VS Code sets CWD to the workspace folder, and `--workspace` is passed via `mcp.json`.
+- **Multi-root** — Each workspace folder can have its own `.cogmemory/`. Point each to CogMemory with different `--workspace` paths, or place a shared `.cogmemory/` in a parent directory.
+
+**Recommended multi-root `mcp.json`** (per-folder):
+
+```json
+{
+  "servers": {
+    "cogmemory-frontend": {
+      "command": "node",
+      "args": [
+        "/path/to/cogmemory-mcp/dist/index.js",
+        "--workspace",
+        "/path/to/frontend"
+      ]
+    },
+    "cogmemory-backend": {
+      "command": "node",
+      "args": [
+        "/path/to/cogmemory-mcp/dist/index.js",
+        "--workspace",
+        "/path/to/backend"
+      ]
+    }
+  }
+}
+```
+
+**Or use a shared database** (all roots in one place):
+
+```json
+{
+  "servers": {
+    "cogmemory": {
+      "command": "node",
+      "args": [
+        "/path/to/cogmemory-mcp/dist/index.js",
+        "--workspace",
+        "/shared/root"
+      ]
+    }
+  }
+}
+```
+
+**Or use global scope** to share across all workspaces:
+
+```json
+{
+  "servers": {
+    "cogmemory": {
+      "command": "node",
+      "args": ["/path/to/cogmemory-mcp/dist/index.js"]
+    }
+  }
+}
+```
+
+```bash
+export COGMEMORY_SCOPE=global
+```
 
 ---
 
@@ -117,7 +196,7 @@ CogMemory resolves scope in priority order:
 
 ## Architecture
 
-```
+```plain
 cogmemory-mcp/
 ├── src/
 │   ├── index.ts                 # entry point, server bootstrap

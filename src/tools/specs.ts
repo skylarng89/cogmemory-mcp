@@ -3,15 +3,18 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
+import { wrapHandler } from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
 export const CreateSpecSchema = z.object({
   title: z
     .string()
+    .min(1)
     .describe("Spec title, e.g. 'Product Requirements Document'"),
   content: z
     .string()
+    .min(1)
     .describe("Full document content (markdown or plain text)"),
   format: z
     .enum(["markdown", "text"])
@@ -54,51 +57,54 @@ export function registerSpecsTools(
         "Store a long-form document (PRD, SRS, design doc), optionally linked to a knowledge graph entity",
       inputSchema: CreateSpecSchema,
     },
-    async ({ title, content, format, entity_id }) => {
-      // Validate entity_id if provided
-      if (entity_id !== undefined) {
-        const entity = db
-          .prepare("SELECT id FROM entities WHERE id = ?")
-          .get(entity_id);
-        if (!entity) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  success: false,
-                  message: `Entity ${entity_id} not found`,
-                }),
-              },
-            ],
-          };
+    wrapHandler(
+      "create_spec",
+      async ({ title, content, format, entity_id }) => {
+        // Validate entity_id if provided
+        if (entity_id !== undefined) {
+          const entity = db
+            .prepare("SELECT id FROM entities WHERE id = ?")
+            .get(entity_id);
+          if (!entity) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify({
+                    success: false,
+                    message: `Entity ${entity_id} not found`,
+                  }),
+                },
+              ],
+            };
+          }
         }
-      }
 
-      const stmt = db.prepare(`
+        const stmt = db.prepare(`
         INSERT INTO specs (entity_id, title, content, format)
         VALUES (?, ?, ?, ?)
       `);
-      const result = stmt.run(
-        entity_id ?? null,
-        title,
-        content,
-        format ?? "markdown",
-      );
+        const result = stmt.run(
+          entity_id ?? null,
+          title,
+          content,
+          format ?? "markdown",
+        );
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-              id: result.lastInsertRowid,
-              message: `Spec created: "${title}"`,
-            }),
-          },
-        ],
-      };
-    },
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                success: true,
+                id: result.lastInsertRowid,
+                message: `Spec created: "${title}"`,
+              }),
+            },
+          ],
+        };
+      },
+    ),
   );
 
   // ── get_spec ──
@@ -108,7 +114,7 @@ export function registerSpecsTools(
       description: "Retrieve a spec by ID or exact title",
       inputSchema: GetSpecSchema,
     },
-    async ({ id, title }) => {
+    wrapHandler("get_spec", async ({ id, title }) => {
       let spec: Record<string, unknown> | undefined;
 
       if (id !== undefined) {
@@ -143,7 +149,7 @@ export function registerSpecsTools(
           },
         ],
       };
-    },
+    }),
   );
 
   // ── update_spec ──
@@ -154,7 +160,7 @@ export function registerSpecsTools(
         "Update a spec's content, title, or entity link (auto-bumps version)",
       inputSchema: UpdateSpecSchema,
     },
-    async ({ id, content, title, entity_id }) => {
+    wrapHandler("update_spec", async ({ id, content, title, entity_id }) => {
       // Fetch current spec
       const current = db.prepare("SELECT * FROM specs WHERE id = ?").get(id) as
         | Record<string, unknown>
@@ -222,6 +228,6 @@ export function registerSpecsTools(
           },
         ],
       };
-    },
+    }),
   );
 }

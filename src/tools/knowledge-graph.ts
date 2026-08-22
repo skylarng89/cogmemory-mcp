@@ -3,13 +3,15 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
+import { wrapHandler } from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
 export const CreateEntitySchema = z.object({
-  name: z.string().describe("Entity name, e.g. 'Auth Service'"),
+  name: z.string().min(1).describe("Entity name, e.g. 'Auth Service'"),
   type: z
     .string()
+    .min(1)
     .describe(
       "Entity type: 'concept' | 'technology' | 'component' | 'spec' | custom",
     ),
@@ -20,12 +22,13 @@ export const CreateRelationSchema = z.object({
   to_entity_id: z.number().int().describe("Target entity ID"),
   relation_type: z
     .string()
+    .min(1)
     .describe("Relation label: 'uses' | 'depends_on' | 'implements' | custom"),
 });
 
 export const AddObservationSchema = z.object({
   entity_id: z.number().int().describe("Entity to attach the observation to"),
-  content: z.string().describe("Observation text / fact"),
+  content: z.string().min(1).describe("Observation text / fact"),
 });
 
 export const SearchKnowledgeSchema = z.object({
@@ -65,7 +68,7 @@ export function registerKnowledgeGraphTools(
         "Add an entity to the knowledge graph (deduped on name+type)",
       inputSchema: CreateEntitySchema,
     },
-    async ({ name, type }) => {
+    wrapHandler("create_entity", async ({ name, type }) => {
       const stmt = db.prepare(`
         INSERT INTO entities (name, type)
         VALUES (?, ?)
@@ -90,7 +93,7 @@ export function registerKnowledgeGraphTools(
           },
         ],
       };
-    },
+    }),
   );
 
   // ── create_relation ──
@@ -100,62 +103,65 @@ export function registerKnowledgeGraphTools(
       description: "Link two entities with a typed relation",
       inputSchema: CreateRelationSchema,
     },
-    async ({ from_entity_id, to_entity_id, relation_type }) => {
-      // Validate both entities exist
-      const fromEntity = db
-        .prepare("SELECT id FROM entities WHERE id = ?")
-        .get(from_entity_id);
-      const toEntity = db
-        .prepare("SELECT id FROM entities WHERE id = ?")
-        .get(to_entity_id);
+    wrapHandler(
+      "create_relation",
+      async ({ from_entity_id, to_entity_id, relation_type }) => {
+        // Validate both entities exist
+        const fromEntity = db
+          .prepare("SELECT id FROM entities WHERE id = ?")
+          .get(from_entity_id);
+        const toEntity = db
+          .prepare("SELECT id FROM entities WHERE id = ?")
+          .get(to_entity_id);
 
-      if (!fromEntity) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: false,
-                message: `Source entity ${from_entity_id} not found`,
-              }),
-            },
-          ],
-        };
-      }
-      if (!toEntity) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: false,
-                message: `Target entity ${to_entity_id} not found`,
-              }),
-            },
-          ],
-        };
-      }
+        if (!fromEntity) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  success: false,
+                  message: `Source entity ${from_entity_id} not found`,
+                }),
+              },
+            ],
+          };
+        }
+        if (!toEntity) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  success: false,
+                  message: `Target entity ${to_entity_id} not found`,
+                }),
+              },
+            ],
+          };
+        }
 
-      const stmt = db.prepare(`
+        const stmt = db.prepare(`
         INSERT INTO relations (from_entity_id, to_entity_id, relation_type)
         VALUES (?, ?, ?)
         ON CONFLICT(from_entity_id, to_entity_id, relation_type) DO NOTHING
       `);
-      const result = stmt.run(from_entity_id, to_entity_id, relation_type);
+        const result = stmt.run(from_entity_id, to_entity_id, relation_type);
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-              created: result.changes > 0,
-              message: `Relation: entity ${from_entity_id} → ${relation_type} → entity ${to_entity_id}`,
-            }),
-          },
-        ],
-      };
-    },
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                success: true,
+                created: result.changes > 0,
+                message: `Relation: entity ${from_entity_id} → ${relation_type} → entity ${to_entity_id}`,
+              }),
+            },
+          ],
+        };
+      },
+    ),
   );
 
   // ── add_observation ──
@@ -165,7 +171,7 @@ export function registerKnowledgeGraphTools(
       description: "Attach a fact/observation to a knowledge graph entity",
       inputSchema: AddObservationSchema,
     },
-    async ({ entity_id, content }) => {
+    wrapHandler("add_observation", async ({ entity_id, content }) => {
       // Validate entity exists
       const entity = db
         .prepare("SELECT id FROM entities WHERE id = ?")
@@ -203,7 +209,7 @@ export function registerKnowledgeGraphTools(
           },
         ],
       };
-    },
+    }),
   );
 
   // ── search_knowledge ──
@@ -214,78 +220,81 @@ export function registerKnowledgeGraphTools(
         "Query the knowledge graph: entities, relations, and observations by name, type, or text",
       inputSchema: SearchKnowledgeSchema,
     },
-    async ({
-      entity_name,
-      entity_type,
-      relation_type,
-      observation_text,
-      limit,
-    }) => {
-      const lim = limit ?? 50;
-      const results: Record<string, unknown[]> = {};
+    wrapHandler(
+      "search_knowledge",
+      async ({
+        entity_name,
+        entity_type,
+        relation_type,
+        observation_text,
+        limit,
+      }) => {
+        const lim = limit ?? 50;
+        const results: Record<string, unknown[]> = {};
 
-      // Entities
-      const entConds: string[] = [];
-      const entParams: unknown[] = [];
-      if (entity_name) {
-        entConds.push("name LIKE ?");
-        entParams.push(`%${entity_name}%`);
-      }
-      if (entity_type) {
-        entConds.push("type = ?");
-        entParams.push(entity_type);
-      }
-      const entWhere =
-        entConds.length > 0 ? `WHERE ${entConds.join(" AND ")}` : "";
-      results.entities = db
-        .prepare(
-          `SELECT * FROM entities ${entWhere} ORDER BY created_at DESC LIMIT ?`,
-        )
-        .all(...entParams, lim);
+        // Entities
+        const entConds: string[] = [];
+        const entParams: unknown[] = [];
+        if (entity_name) {
+          entConds.push("name LIKE ?");
+          entParams.push(`%${entity_name}%`);
+        }
+        if (entity_type) {
+          entConds.push("type = ?");
+          entParams.push(entity_type);
+        }
+        const entWhere =
+          entConds.length > 0 ? `WHERE ${entConds.join(" AND ")}` : "";
+        results.entities = db
+          .prepare(
+            `SELECT * FROM entities ${entWhere} ORDER BY created_at DESC LIMIT ?`,
+          )
+          .all(...entParams, lim);
 
-      // Relations
-      const relConds: string[] = [];
-      const relParams: unknown[] = [];
-      if (relation_type) {
-        relConds.push("relation_type LIKE ?");
-        relParams.push(`%${relation_type}%`);
-      }
-      const relWhere =
-        relConds.length > 0 ? `WHERE ${relConds.join(" AND ")}` : "";
-      results.relations = db
-        .prepare(
-          `SELECT r.*, fe.name as from_name, fe.type as from_type, te.name as to_name, te.type as to_type
+        // Relations
+        const relConds: string[] = [];
+        const relParams: unknown[] = [];
+        if (relation_type) {
+          relConds.push("relation_type LIKE ?");
+          relParams.push(`%${relation_type}%`);
+        }
+        const relWhere =
+          relConds.length > 0 ? `WHERE ${relConds.join(" AND ")}` : "";
+        results.relations = db
+          .prepare(
+            `SELECT r.*, fe.name as from_name, fe.type as from_type, te.name as to_name, te.type as to_type
            FROM relations r
            JOIN entities fe ON r.from_entity_id = fe.id
            JOIN entities te ON r.to_entity_id = te.id
            ${relWhere}
            ORDER BY r.created_at DESC LIMIT ?`,
-        )
-        .all(...relParams, lim);
+          )
+          .all(...relParams, lim);
 
-      // Observations
-      if (observation_text) {
-        results.observations = db
-          .prepare(
-            `SELECT o.*, e.name as entity_name, e.type as entity_type
+        // Observations
+        if (observation_text) {
+          results.observations = db
+            .prepare(
+              `SELECT o.*, e.name as entity_name, e.type as entity_type
              FROM observations o
              JOIN entities e ON o.entity_id = e.id
              WHERE o.content LIKE ?
              ORDER BY o.created_at DESC LIMIT ?`,
-          )
-          .all(`%${observation_text}%`, lim);
-      } else {
-        results.observations = [];
-      }
+            )
+            .all(`%${observation_text}%`, lim);
+        } else {
+          results.observations = [];
+        }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(results),
-          },
-        ],
-      };
-    },
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(results),
+            },
+          ],
+        };
+      },
+    ),
   );
 }

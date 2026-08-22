@@ -3,12 +3,13 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
+import { wrapHandler } from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
 export const AddPlanItemSchema = z.object({
   phase: z.string().optional().describe("Phase name, e.g. 'Phase 1'"),
-  title: z.string().describe("Plan item title"),
+  title: z.string().min(1).describe("Plan item title"),
   description: z.string().optional().describe("Detailed description"),
   status: z
     .enum(["planned", "in-progress", "done", "dropped"])
@@ -27,7 +28,7 @@ export const UpdatePlanStatusSchema = z.object({
 export const CreateTaskSchema = z.object({
   plan_id: z.number().int().optional().describe("Link to a plan item"),
   session_id: z.number().int().optional().describe("Current session ID"),
-  title: z.string().describe("Task title"),
+  title: z.string().min(1).describe("Task title"),
   description: z.string().optional().describe("Task description"),
   status: z
     .enum(["todo", "in-progress", "blocked", "done"])
@@ -56,31 +57,34 @@ export function registerPlanTasksTools(
       description: "Add a roadmap/plan item",
       inputSchema: AddPlanItemSchema,
     },
-    async ({ phase, title, description, status, order_index }) => {
-      const stmt = db.prepare(`
+    wrapHandler(
+      "add_plan_item",
+      async ({ phase, title, description, status, order_index }) => {
+        const stmt = db.prepare(`
         INSERT INTO plan (phase, title, description, status, order_index)
         VALUES (?, ?, ?, ?, ?)
       `);
-      const result = stmt.run(
-        phase ?? null,
-        title,
-        description ?? null,
-        status ?? "planned",
-        order_index ?? 0,
-      );
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-              id: result.lastInsertRowid,
-              message: `Plan item added: "${title}"`,
-            }),
-          },
-        ],
-      };
-    },
+        const result = stmt.run(
+          phase ?? null,
+          title,
+          description ?? null,
+          status ?? "planned",
+          order_index ?? 0,
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                success: true,
+                id: result.lastInsertRowid,
+                message: `Plan item added: "${title}"`,
+              }),
+            },
+          ],
+        };
+      },
+    ),
   );
 
   // ── update_plan_status ──
@@ -90,7 +94,7 @@ export function registerPlanTasksTools(
       description: "Update the status of a plan item",
       inputSchema: UpdatePlanStatusSchema,
     },
-    async ({ id, status }) => {
+    wrapHandler("update_plan_status", async ({ id, status }) => {
       const stmt = db.prepare(`
         UPDATE plan SET status = ?, updated_at = datetime('now')
         WHERE id = ?
@@ -120,7 +124,7 @@ export function registerPlanTasksTools(
           },
         ],
       };
-    },
+    }),
   );
 
   // ── create_task ──
@@ -131,32 +135,35 @@ export function registerPlanTasksTools(
         "Create an actionable task, optionally linked to a plan item",
       inputSchema: CreateTaskSchema,
     },
-    async ({ plan_id, session_id, title, description, status, tags }) => {
-      const stmt = db.prepare(`
+    wrapHandler(
+      "create_task",
+      async ({ plan_id, session_id, title, description, status, tags }) => {
+        const stmt = db.prepare(`
         INSERT INTO tasks (plan_id, session_id, title, description, status, tags)
         VALUES (?, ?, ?, ?, ?, ?)
       `);
-      const result = stmt.run(
-        plan_id ?? null,
-        session_id ?? null,
-        title,
-        description ?? null,
-        status ?? "todo",
-        tags ?? null,
-      );
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-              id: result.lastInsertRowid,
-              message: `Task created: "${title}"`,
-            }),
-          },
-        ],
-      };
-    },
+        const result = stmt.run(
+          plan_id ?? null,
+          session_id ?? null,
+          title,
+          description ?? null,
+          status ?? "todo",
+          tags ?? null,
+        );
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                success: true,
+                id: result.lastInsertRowid,
+                message: `Task created: "${title}"`,
+              }),
+            },
+          ],
+        };
+      },
+    ),
   );
 
   // ── update_task_status ──
@@ -166,7 +173,7 @@ export function registerPlanTasksTools(
       description: "Update the status of a task",
       inputSchema: UpdateTaskStatusSchema,
     },
-    async ({ id, status }) => {
+    wrapHandler("update_task_status", async ({ id, status }) => {
       const stmt = db.prepare(`
         UPDATE tasks SET status = ?, updated_at = datetime('now')
         WHERE id = ?
@@ -196,6 +203,6 @@ export function registerPlanTasksTools(
           },
         ],
       };
-    },
+    }),
   );
 }

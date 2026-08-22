@@ -154,6 +154,13 @@ export function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_specs_entity ON specs(entity_id);
     CREATE INDEX IF NOT EXISTS idx_specs_title  ON specs(title);
 
+    -- ─── CODE GRAPH: file_index (mtime tracking for incremental indexing)
+    CREATE TABLE IF NOT EXISTS file_index (
+      file_path  TEXT PRIMARY KEY,
+      mtime_ms   INTEGER NOT NULL,
+      indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     -- ─── CODE GRAPH: symbols ──────────────────────────────
     CREATE TABLE IF NOT EXISTS symbols (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -203,5 +210,101 @@ export function migrate(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_annotations_symbol ON codemap_annotations(symbol_id);
     CREATE INDEX IF NOT EXISTS idx_annotations_trace  ON codemap_annotations(trace_id);
+
+    -- ─── RECALL: FTS5 full-text search index ─────────────
+    CREATE TABLE IF NOT EXISTS recall_docs (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      source     TEXT NOT NULL,
+      doc_id     INTEGER NOT NULL,
+      body       TEXT NOT NULL,
+      tags       TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(source, doc_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_recall_docs_source ON recall_docs(source, doc_id);
+    CREATE INDEX IF NOT EXISTS idx_recall_docs_created ON recall_docs(created_at);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS recall_fts USING fts5(
+      body, tags,
+      content='recall_docs',
+      content_rowid='id'
+    );
+
+    -- recall_docs → recall_fts sync triggers
+    CREATE TRIGGER IF NOT EXISTS trg_recall_docs_ai AFTER INSERT ON recall_docs BEGIN
+      INSERT INTO recall_fts(rowid, body, tags) VALUES (new.id, new.body, new.tags);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_recall_docs_ad AFTER DELETE ON recall_docs BEGIN
+      INSERT INTO recall_fts(recall_fts, rowid, body, tags) VALUES ('delete', old.id, old.body, old.tags);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_recall_docs_au AFTER UPDATE ON recall_docs BEGIN
+      INSERT INTO recall_fts(recall_fts, rowid, body, tags) VALUES ('delete', old.id, old.body, old.tags);
+      INSERT INTO recall_fts(rowid, body, tags) VALUES (new.id, new.body, new.tags);
+    END;
+
+    -- decisions → recall_docs sync triggers
+    CREATE TRIGGER IF NOT EXISTS trg_decisions_fts_ai AFTER INSERT ON decisions BEGIN
+      INSERT OR IGNORE INTO recall_docs(source, doc_id, body, tags, created_at)
+      VALUES ('decisions', NEW.id, NEW.title || ' ' || COALESCE(NEW.rationale, ''), COALESCE(NEW.tags, ''), NEW.created_at);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_decisions_fts_ad AFTER DELETE ON decisions BEGIN
+      DELETE FROM recall_docs WHERE source = 'decisions' AND doc_id = OLD.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_decisions_fts_au AFTER UPDATE ON decisions BEGIN
+      UPDATE recall_docs SET body = NEW.title || ' ' || COALESCE(NEW.rationale, ''), tags = COALESCE(NEW.tags, ''), created_at = NEW.created_at
+      WHERE source = 'decisions' AND doc_id = OLD.id;
+    END;
+
+    -- conventions → recall_docs sync triggers
+    CREATE TRIGGER IF NOT EXISTS trg_conventions_fts_ai AFTER INSERT ON conventions BEGIN
+      INSERT OR IGNORE INTO recall_docs(source, doc_id, body, tags, created_at)
+      VALUES ('conventions', NEW.id, NEW.key || ' ' || COALESCE(NEW.value, '') || ' ' || COALESCE(NEW.description, ''), COALESCE(NEW.tags, ''), NEW.created_at);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_conventions_fts_ad AFTER DELETE ON conventions BEGIN
+      DELETE FROM recall_docs WHERE source = 'conventions' AND doc_id = OLD.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_conventions_fts_au AFTER UPDATE ON conventions BEGIN
+      UPDATE recall_docs SET body = NEW.key || ' ' || COALESCE(NEW.value, '') || ' ' || COALESCE(NEW.description, ''), tags = COALESCE(NEW.tags, ''), created_at = NEW.updated_at
+      WHERE source = 'conventions' AND doc_id = OLD.id;
+    END;
+
+    -- errors → recall_docs sync triggers
+    CREATE TRIGGER IF NOT EXISTS trg_errors_fts_ai AFTER INSERT ON errors BEGIN
+      INSERT OR IGNORE INTO recall_docs(source, doc_id, body, tags, created_at)
+      VALUES ('errors', NEW.id, NEW.error_signature || ' ' || COALESCE(NEW.description, '') || ' ' || COALESCE(NEW.resolution, ''), COALESCE(NEW.tags, ''), NEW.created_at);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_errors_fts_ad AFTER DELETE ON errors BEGIN
+      DELETE FROM recall_docs WHERE source = 'errors' AND doc_id = OLD.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_errors_fts_au AFTER UPDATE ON errors BEGIN
+      UPDATE recall_docs SET body = NEW.error_signature || ' ' || COALESCE(NEW.description, '') || ' ' || COALESCE(NEW.resolution, ''), tags = COALESCE(NEW.tags, ''), created_at = NEW.created_at
+      WHERE source = 'errors' AND doc_id = OLD.id;
+    END;
+
+    -- changelog → recall_docs sync triggers
+    CREATE TRIGGER IF NOT EXISTS trg_changelog_fts_ai AFTER INSERT ON changelog BEGIN
+      INSERT OR IGNORE INTO recall_docs(source, doc_id, body, tags, created_at)
+      VALUES ('changelog', NEW.id, NEW.summary || ' ' || COALESCE(NEW.ref, ''), '', NEW.created_at);
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_changelog_fts_ad AFTER DELETE ON changelog BEGIN
+      DELETE FROM recall_docs WHERE source = 'changelog' AND doc_id = OLD.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS trg_changelog_fts_au AFTER UPDATE ON changelog BEGIN
+      UPDATE recall_docs SET body = NEW.summary || ' ' || COALESCE(NEW.ref, ''), created_at = NEW.created_at
+      WHERE source = 'changelog' AND doc_id = OLD.id;
+    END;
+
+    -- Populate recall_docs from existing data (idempotent via UNIQUE index)
+    INSERT OR IGNORE INTO recall_docs(source, doc_id, body, tags, created_at)
+      SELECT 'decisions', id, title || ' ' || COALESCE(rationale, ''), COALESCE(tags, ''), created_at FROM decisions;
+    INSERT OR IGNORE INTO recall_docs(source, doc_id, body, tags, created_at)
+      SELECT 'conventions', id, key || ' ' || COALESCE(value, '') || ' ' || COALESCE(description, ''), COALESCE(tags, ''), created_at FROM conventions;
+    INSERT OR IGNORE INTO recall_docs(source, doc_id, body, tags, created_at)
+      SELECT 'errors', id, error_signature || ' ' || COALESCE(description, '') || ' ' || COALESCE(resolution, ''), COALESCE(tags, ''), created_at FROM errors;
+    INSERT OR IGNORE INTO recall_docs(source, doc_id, body, tags, created_at)
+      SELECT 'changelog', id, summary || ' ' || COALESCE(ref, ''), '', created_at FROM changelog;
+
+    -- Rebuild FTS index to ensure consistency
+    INSERT INTO recall_fts(recall_fts) VALUES('rebuild');
   `);
 }
