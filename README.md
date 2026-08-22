@@ -51,9 +51,11 @@ pnpm run inspect
 CogMemory resolves scope in priority order:
 
 1. **`.cogmemory/config.json`** in workspace root:
+
    ```json
    { "scope": "global" }
    ```
+
 2. **Environment variable**: `COGMEMORY_SCOPE=global`
 3. **Default**: `workspace`
 
@@ -194,7 +196,7 @@ export COGMEMORY_SCOPE=global
 
 ## Architecture
 
-```
+```plain
 cogmemory-mcp/
 ├── src/
 │   ├── index.ts                 # entry point, server bootstrap
