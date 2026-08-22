@@ -1,11 +1,16 @@
 {
   "name": "cogmemory-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "mcpName": "io.github.skylarng89/cogmemory-mcp",
   "author": {
     "name": "Patrick Aziken",
     "email": "onaziken@gmail.com"
   },
   "description": "CogMemory MCP Server — Unified context subsystems for AI coding agents",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/skylarng89/cogmemory-mcp.git"
+  },
   "license": "MIT",
   "keywords": [
     "mcp",
