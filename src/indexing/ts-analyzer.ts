@@ -75,6 +75,29 @@ export function analyzeFiles(files: string[], rootDir: string): AnalysisResult {
 }
 
 /**
+ * Register a symbol in the collection and index.
+ */
+function registerSymbol(
+  filePath: string,
+  name: string,
+  symbolType: string,
+  startLine: number,
+  endLine: number,
+  symbols: ExtractedSymbol[],
+  symbolIndex: Map<string, ExtractedSymbol>,
+): void {
+  const sym: ExtractedSymbol = {
+    file_path: filePath,
+    symbol_name: name,
+    symbol_type: symbolType,
+    start_line: startLine,
+    end_line: endLine,
+  };
+  symbols.push(sym);
+  symbolIndex.set(`${filePath}:${name}`, sym);
+}
+
+/**
  * Extract named declarations from a source file.
  */
 function extractSymbols(
@@ -83,108 +106,127 @@ function extractSymbols(
   symbols: ExtractedSymbol[],
   symbolIndex: Map<string, ExtractedSymbol>,
 ): void {
-  // Functions
+  extractFunctions(sourceFile, filePath, symbols, symbolIndex);
+  extractClasses(sourceFile, filePath, symbols, symbolIndex);
+  extractSimpleDeclarations(sourceFile, filePath, symbols, symbolIndex);
+  extractVariables(sourceFile, filePath, symbols, symbolIndex);
+}
+
+function extractFunctions(
+  sourceFile: SourceFile,
+  filePath: string,
+  symbols: ExtractedSymbol[],
+  symbolIndex: Map<string, ExtractedSymbol>,
+): void {
   for (const fn of sourceFile.getFunctions()) {
     const name = fn.getName();
-    if (!name) continue; // Skip anonymous functions
-    const sym: ExtractedSymbol = {
-      file_path: filePath,
-      symbol_name: name,
-      symbol_type: fn.isAsync() ? "async-function" : "function",
-      start_line: fn.getStartLineNumber(),
-      end_line: fn.getEndLineNumber(),
-    };
-    symbols.push(sym);
-    symbolIndex.set(`${filePath}:${name}`, sym);
+    if (!name) continue;
+    const type = fn.isAsync() ? "async-function" : "function";
+    registerSymbol(
+      filePath,
+      name,
+      type,
+      fn.getStartLineNumber(),
+      fn.getEndLineNumber(),
+      symbols,
+      symbolIndex,
+    );
   }
+}
 
-  // Classes
+function extractClasses(
+  sourceFile: SourceFile,
+  filePath: string,
+  symbols: ExtractedSymbol[],
+  symbolIndex: Map<string, ExtractedSymbol>,
+): void {
   for (const cls of sourceFile.getClasses()) {
     const name = cls.getName();
     if (!name) continue;
-    const sym: ExtractedSymbol = {
-      file_path: filePath,
-      symbol_name: name,
-      symbol_type: "class",
-      start_line: cls.getStartLineNumber(),
-      end_line: cls.getEndLineNumber(),
-    };
-    symbols.push(sym);
-    symbolIndex.set(`${filePath}:${name}`, sym);
-
-    // Methods within class
+    registerSymbol(
+      filePath,
+      name,
+      "class",
+      cls.getStartLineNumber(),
+      cls.getEndLineNumber(),
+      symbols,
+      symbolIndex,
+    );
     for (const method of cls.getMethods()) {
-      const methodName = method.getName();
-      const mSym: ExtractedSymbol = {
-        file_path: filePath,
-        symbol_name: `${name}.${methodName}`,
-        symbol_type: "method",
-        start_line: method.getStartLineNumber(),
-        end_line: method.getEndLineNumber(),
-      };
-      symbols.push(mSym);
-      symbolIndex.set(`${filePath}:${name}.${methodName}`, mSym);
+      registerSymbol(
+        filePath,
+        `${name}.${method.getName()}`,
+        "method",
+        method.getStartLineNumber(),
+        method.getEndLineNumber(),
+        symbols,
+        symbolIndex,
+      );
     }
   }
+}
 
-  // Interfaces
+function extractSimpleDeclarations(
+  sourceFile: SourceFile,
+  filePath: string,
+  symbols: ExtractedSymbol[],
+  symbolIndex: Map<string, ExtractedSymbol>,
+): void {
   for (const iface of sourceFile.getInterfaces()) {
-    const name = iface.getName();
-    const sym: ExtractedSymbol = {
-      file_path: filePath,
-      symbol_name: name,
-      symbol_type: "interface",
-      start_line: iface.getStartLineNumber(),
-      end_line: iface.getEndLineNumber(),
-    };
-    symbols.push(sym);
-    symbolIndex.set(`${filePath}:${name}`, sym);
+    registerSymbol(
+      filePath,
+      iface.getName(),
+      "interface",
+      iface.getStartLineNumber(),
+      iface.getEndLineNumber(),
+      symbols,
+      symbolIndex,
+    );
   }
-
-  // Type aliases
   for (const ta of sourceFile.getTypeAliases()) {
-    const name = ta.getName();
-    const sym: ExtractedSymbol = {
-      file_path: filePath,
-      symbol_name: name,
-      symbol_type: "type-alias",
-      start_line: ta.getStartLineNumber(),
-      end_line: ta.getEndLineNumber(),
-    };
-    symbols.push(sym);
-    symbolIndex.set(`${filePath}:${name}`, sym);
+    registerSymbol(
+      filePath,
+      ta.getName(),
+      "type-alias",
+      ta.getStartLineNumber(),
+      ta.getEndLineNumber(),
+      symbols,
+      symbolIndex,
+    );
   }
-
-  // Enums
   for (const en of sourceFile.getEnums()) {
-    const name = en.getName();
-    const sym: ExtractedSymbol = {
-      file_path: filePath,
-      symbol_name: name,
-      symbol_type: "enum",
-      start_line: en.getStartLineNumber(),
-      end_line: en.getEndLineNumber(),
-    };
-    symbols.push(sym);
-    symbolIndex.set(`${filePath}:${name}`, sym);
+    registerSymbol(
+      filePath,
+      en.getName(),
+      "enum",
+      en.getStartLineNumber(),
+      en.getEndLineNumber(),
+      symbols,
+      symbolIndex,
+    );
   }
+}
 
-  // Variable declarations (exported const/let/var with function or object values)
+function extractVariables(
+  sourceFile: SourceFile,
+  filePath: string,
+  symbols: ExtractedSymbol[],
+  symbolIndex: Map<string, ExtractedSymbol>,
+): void {
   for (const varDecl of sourceFile.getVariableDeclarations()) {
     const name = varDecl.getName();
     if (!name) continue;
-    // Only include top-level declarations (not inside functions)
     const parentKind = varDecl.getParent()?.getParent()?.getKind();
     if (parentKind === SyntaxKind.VariableStatement) {
-      const sym: ExtractedSymbol = {
-        file_path: filePath,
-        symbol_name: name,
-        symbol_type: "variable",
-        start_line: varDecl.getStartLineNumber(),
-        end_line: varDecl.getEndLineNumber(),
-      };
-      symbols.push(sym);
-      symbolIndex.set(`${filePath}:${name}`, sym);
+      registerSymbol(
+        filePath,
+        name,
+        "variable",
+        varDecl.getStartLineNumber(),
+        varDecl.getEndLineNumber(),
+        symbols,
+        symbolIndex,
+      );
     }
   }
 }
@@ -199,88 +241,100 @@ function extractEdges(
   symbolIndex: Map<string, ExtractedSymbol>,
   rootDir: string,
 ): void {
-  // Import edges
+  processImportEdges(sourceFile, filePath, edges, rootDir);
+  sourceFile.forEachDescendant((node) => {
+    processCallExpression(node, filePath, edges, symbolIndex);
+  });
+  processClassHierarchyEdges(sourceFile, filePath, edges, rootDir);
+}
+
+function processImportEdges(
+  sourceFile: SourceFile,
+  filePath: string,
+  edges: ExtractedEdge[],
+  rootDir: string,
+): void {
   for (const importDecl of sourceFile.getImportDeclarations()) {
-    const moduleSpecifier = importDecl.getModuleSpecifierValue();
     const resolved = resolveImportPath(
       sourceFile.getFilePath(),
-      moduleSpecifier,
+      importDecl.getModuleSpecifierValue(),
       rootDir,
     );
+    if (!resolved) continue;
 
-    if (resolved) {
-      const namedImports = importDecl.getNamedImports();
-      for (const named of namedImports) {
-        edges.push({
-          from_file: filePath,
-          from_name: filePath,
-          from_start_line: importDecl.getStartLineNumber(),
-          to_file: resolved,
-          to_name: named.getName(),
-          to_start_line: null,
-          edge_type: "imports",
-        });
-      }
+    const startLine = importDecl.getStartLineNumber();
+    for (const named of importDecl.getNamedImports()) {
+      edges.push({
+        from_file: filePath,
+        from_name: filePath,
+        from_start_line: startLine,
+        to_file: resolved,
+        to_name: named.getName(),
+        to_start_line: null,
+        edge_type: "imports",
+      });
+    }
 
-      // Default import
-      const defaultImport = importDecl.getDefaultImport();
-      if (defaultImport) {
-        edges.push({
-          from_file: filePath,
-          from_name: filePath,
-          from_start_line: importDecl.getStartLineNumber(),
-          to_file: resolved,
-          to_name: "default",
-          to_start_line: null,
-          edge_type: "imports",
-        });
-      }
+    const defaultImport = importDecl.getDefaultImport();
+    if (defaultImport) {
+      edges.push({
+        from_file: filePath,
+        from_name: filePath,
+        from_start_line: startLine,
+        to_file: resolved,
+        to_name: "default",
+        to_start_line: null,
+        edge_type: "imports",
+      });
+    }
+  }
+}
+
+function processCallExpression(
+  node: Node,
+  filePath: string,
+  edges: ExtractedEdge[],
+  symbolIndex: Map<string, ExtractedSymbol>,
+): void {
+  if (!Node.isCallExpression(node)) return;
+  const expr = node.getExpression();
+  const startLine = node.getStartLineNumber();
+
+  if (Node.isIdentifier(expr)) {
+    const calleeName = expr.getText();
+    const key = `${filePath}:${calleeName}`;
+    if (symbolIndex.has(key)) {
+      edges.push({
+        from_file: filePath,
+        from_name: findEnclosingSymbol(node, filePath),
+        from_start_line: startLine,
+        to_file: filePath,
+        to_name: calleeName,
+        to_start_line: symbolIndex.get(key)!.start_line,
+        edge_type: "calls",
+      });
     }
   }
 
-  // Call expression edges
-  sourceFile.forEachDescendant((node) => {
-    if (Node.isCallExpression(node)) {
-      const expr = node.getExpression();
-      const startLine = node.getStartLineNumber();
+  if (Node.isPropertyAccessExpression(expr)) {
+    edges.push({
+      from_file: filePath,
+      from_name: findEnclosingSymbol(node, filePath),
+      from_start_line: startLine,
+      to_file: filePath,
+      to_name: expr.getName(),
+      to_start_line: null,
+      edge_type: "calls",
+    });
+  }
+}
 
-      // Direct function call: foo()
-      if (Node.isIdentifier(expr)) {
-        const calleeName = expr.getText();
-        // Look up in the same file
-        const key = `${filePath}:${calleeName}`;
-        if (symbolIndex.has(key)) {
-          edges.push({
-            from_file: filePath,
-            from_name: findEnclosingSymbol(node, filePath),
-            from_start_line: startLine,
-            to_file: filePath,
-            to_name: calleeName,
-            to_start_line: symbolIndex.get(key)!.start_line,
-            edge_type: "calls",
-          });
-        }
-      }
-
-      // Method call: obj.method()
-      if (Node.isPropertyAccessExpression(expr)) {
-        const methodName = expr.getName();
-        // We can only track calls to known methods
-        // This is a heuristic — we record the call but can't always resolve the target
-        edges.push({
-          from_file: filePath,
-          from_name: findEnclosingSymbol(node, filePath),
-          from_start_line: startLine,
-          to_file: filePath,
-          to_name: methodName,
-          to_start_line: null,
-          edge_type: "calls",
-        });
-      }
-    }
-  });
-
-  // Class extends/implements edges
+function processClassHierarchyEdges(
+  sourceFile: SourceFile,
+  filePath: string,
+  edges: ExtractedEdge[],
+  rootDir: string,
+): void {
   for (const cls of sourceFile.getClasses()) {
     const className = cls.getName();
     if (!className) continue;
@@ -301,15 +355,13 @@ function extractEdges(
       });
     }
 
-    const interfaces = cls.getImplements();
-    for (const iface of interfaces) {
-      const ifaceName = iface.getExpression().getText();
+    for (const iface of cls.getImplements()) {
       edges.push({
         from_file: filePath,
         from_name: className,
         from_start_line: cls.getStartLineNumber(),
         to_file: filePath,
-        to_name: ifaceName,
+        to_name: iface.getExpression().getText(),
         to_start_line: null,
         edge_type: "implements",
       });
@@ -318,26 +370,34 @@ function extractEdges(
 }
 
 /**
+ * Resolve a method declaration to its qualified name (ClassName.methodName).
+ */
+function resolveMethodSymbol(node: Node): string | null {
+  if (!Node.isMethodDeclaration(node)) return null;
+  const name = node.getName();
+  const parentClass = node.getParent();
+  if (Node.isClassDeclaration(parentClass)) {
+    const className = parentClass.getName();
+    if (className) return `${className}.${name}`;
+  }
+  return name;
+}
+
+/**
  * Find the name of the enclosing symbol (function/class/method) for a node.
  */
 function findEnclosingSymbol(node: Node, filePath: string): string {
   let current: Node | undefined = node;
   while (current) {
+    const methodResult = resolveMethodSymbol(current);
+    if (methodResult !== null) return methodResult;
+
     if (
       Node.isFunctionDeclaration(current) ||
       Node.isFunctionExpression(current)
     ) {
       const name = current.getName();
       if (name) return name;
-    }
-    if (Node.isMethodDeclaration(current)) {
-      const name = current.getName();
-      const parentClass = current.getParent();
-      if (Node.isClassDeclaration(parentClass)) {
-        const className = parentClass.getName();
-        if (className) return `${className}.${name}`;
-      }
-      return name;
     }
     if (Node.isClassDeclaration(current)) {
       const name = current.getName();
@@ -362,43 +422,26 @@ function resolveImportPath(
     return null;
   }
 
-  // For relative imports, compute the resolved path
   const dir = dirname(fromFile);
-  let resolved = pathJoin(dir, moduleSpecifier);
+  const resolved = pathJoin(dir, moduleSpecifier);
 
-  // Add common extensions if not present
-  const exts = [
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    "/index.ts",
-    "/index.tsx",
-    "/index.js",
-    "/index.jsx",
+  const knownExts = [".ts", ".tsx", ".js", ".jsx"];
+  if (knownExts.some((ext) => resolved.endsWith(ext))) {
+    return resolved;
+  }
+
+  const candidates = [
+    ...knownExts.map((ext) => resolved + ext),
+    ...knownExts.map((ext) => resolved + "/index" + ext),
   ];
-  if (!exts.some((ext) => resolved.endsWith(ext))) {
-    // Try extensions in order
-    for (const ext of [".ts", ".tsx", ".js", ".jsx"]) {
-      try {
-        const fullPath = pathJoin(_rootDir, resolved + ext);
-        if (existsSync(fullPath)) {
-          return resolved + ext;
-        }
-      } catch {
-        // Continue
+
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(pathJoin(_rootDir, candidate))) {
+        return candidate;
       }
-    }
-    // Try index files
-    for (const ext of ["/index.ts", "/index.tsx", "/index.js", "/index.jsx"]) {
-      try {
-        const fullPath = pathJoin(_rootDir, resolved + ext);
-        if (existsSync(fullPath)) {
-          return resolved + ext;
-        }
-      } catch {
-        // Continue
-      }
+    } catch {
+      // Continue
     }
   }
 
