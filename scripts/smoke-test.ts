@@ -2,10 +2,11 @@
 // Runs all tools against a temporary database to verify basic functionality.
 
 import { join } from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import { migrate } from "../src/db/migrate.js";
+import { analyzePythonFiles } from "../src/indexing/py-analyzer.js";
 
 const tmpDir = mkdtempSync(join(tmpdir(), "cogmemory-test-"));
 const dbPath = join(tmpDir, "test.db");
@@ -16,15 +17,25 @@ console.log(`   DB: ${dbPath}\n`);
 let passed = 0;
 let failed = 0;
 
-function assert(condition: boolean, label: string): void {
-  if (condition) {
-    console.log(`  ✅ ${label}`);
-    passed++;
-  } else {
-    console.error(`  ❌ ${label}`);
-    failed++;
-  }
+function pass(label: string): void {
+  console.log(`  ✅ ${label}`);
+  passed++;
 }
+
+function fail(label: string): void {
+  console.error(`  ❌ ${label}`);
+  failed++;
+}
+
+function checkTrue(value: unknown, label: string): void {
+  value ? pass(label) : fail(label);
+}
+
+function checkEqual(actual: unknown, expected: unknown, label: string): void {
+  actual === expected ? pass(label) : fail(label);
+}
+
+const assert = checkTrue;
 
 function run() {
   const db = new Database(dbPath);
@@ -292,6 +303,145 @@ function run() {
   assert(
     ftsAfterDelete.length === 0,
     "FTS5 triggers auto-remove deleted decisions",
+  );
+
+  // ── Knowledge Graph FTS5 ───────────────────────────────
+  console.log("\n📋 Knowledge Graph FTS5");
+  const kgFtsEntity = db
+    .prepare(
+      "SELECT kd.source, kd.doc_id FROM kg_fts kf JOIN kg_docs kd ON kd.id = kf.rowid WHERE kg_fts MATCH ?",
+    )
+    .all("CogMemory");
+  assert(
+    kgFtsEntity.length > 0,
+    "KG FTS5 MATCH finds entities containing 'CogMemory'",
+  );
+
+  const kgFtsObs = db
+    .prepare(
+      "SELECT kd.source, kd.doc_id FROM kg_fts kf JOIN kg_docs kd ON kd.id = kf.rowid WHERE kg_fts MATCH ?",
+    )
+    .all("MCP");
+  assert(
+    kgFtsObs.length > 0,
+    "KG FTS5 MATCH finds observations containing 'MCP'",
+  );
+
+  const kgDocsCount = (
+    db.prepare("SELECT COUNT(*) as cnt FROM kg_docs").get() as { cnt: number }
+  ).cnt;
+  assert(kgDocsCount > 0, "kg_docs populated by triggers");
+
+  // KG FTS5 trigger: insert a new entity and verify it appears in kg_fts
+  db.prepare("INSERT INTO entities (name, type) VALUES (?, ?)").run(
+    "FastAPI",
+    "technology",
+  );
+  const kgFtsNew = db
+    .prepare(
+      "SELECT kd.source, kd.doc_id FROM kg_fts kf JOIN kg_docs kd ON kd.id = kf.rowid WHERE kg_fts MATCH ?",
+    )
+    .all("FastAPI");
+  assert(kgFtsNew.length > 0, "KG FTS5 triggers auto-index new entities");
+
+  // KG FTS5 trigger: delete and verify removal
+  db.prepare("DELETE FROM entities WHERE name = ?").run("FastAPI");
+  const kgFtsAfterDelete = db
+    .prepare(
+      "SELECT kd.source, kd.doc_id FROM kg_fts kf JOIN kg_docs kd ON kd.id = kf.rowid WHERE kg_fts MATCH ?",
+    )
+    .all("FastAPI");
+  assert(
+    kgFtsAfterDelete.length === 0,
+    "KG FTS5 triggers auto-remove deleted entities",
+  );
+
+  // ── List & Delete tools ───────────────────────────────
+  console.log("\n📋 List & Delete tools");
+  const listDecisions = db
+    .prepare("SELECT * FROM decisions ORDER BY created_at DESC LIMIT ?")
+    .all(10);
+  assert(listDecisions.length > 0, "list_items returns decisions");
+
+  const decisionId = (listDecisions[0] as Record<string, unknown>).id as number;
+  db.prepare("DELETE FROM decisions WHERE id = ?").run(decisionId);
+  const stillThere = db
+    .prepare("SELECT * FROM decisions WHERE id = ?")
+    .get(decisionId);
+  assert(stillThere === undefined, "delete_item removes a decision");
+
+  // delete_by_key for context
+  db.prepare("DELETE FROM context WHERE key = ?").run("active_task");
+  const ctxGone = db
+    .prepare("SELECT * FROM context WHERE key = ?")
+    .get("active_task");
+  assert(ctxGone === undefined, "delete_by_key removes context entry");
+
+  // purge_subsystem for observations
+  const obsBefore = (
+    db.prepare("SELECT COUNT(*) as cnt FROM observations").get() as {
+      cnt: number;
+    }
+  ).cnt;
+  db.exec("DELETE FROM observations");
+  const obsAfter = (
+    db.prepare("SELECT COUNT(*) as cnt FROM observations").get() as {
+      cnt: number;
+    }
+  ).cnt;
+  assert(
+    obsBefore > 0 && obsAfter === 0,
+    "purge_subsystem clears all observations",
+  );
+
+  // ── Python analyzer ────────────────────────────────────
+  console.log("\n📋 Python analyzer (tree-sitter)");
+  const pySource = `
+import os
+from typing import List
+
+class Greeter:
+    def __init__(self, name: str):
+        self.name = name
+
+    def greet(self) -> str:
+        return f"Hello, {self.name}"
+
+def main() -> None:
+    g = Greeter("world")
+    print(g.greet())
+
+main()
+`;
+  const pyPath = join(tmpDir, "sample.py");
+  writeFileSync(pyPath, pySource);
+  const pyResult = analyzePythonFiles([pyPath], tmpDir);
+  const pySymbolNames = new Set(pyResult.symbols.map((s) => s.symbol_name));
+  assert(
+    pySymbolNames.has("Greeter"),
+    "Python analyzer extracts class symbols",
+  );
+  assert(
+    pySymbolNames.has("Greeter.__init__"),
+    "Python analyzer extracts method symbols",
+  );
+  assert(
+    pySymbolNames.has("main"),
+    "Python analyzer extracts function symbols",
+  );
+  const pyCallEdges = pyResult.edges.filter((e) => e.edge_type === "calls");
+  assert(
+    pyCallEdges.some((e) => e.to_name === "Greeter"),
+    "Python analyzer records call edges to Greeter",
+  );
+  assert(
+    pyCallEdges.some((e) => e.to_name === "greet"),
+    "Python analyzer records method call edges",
+  );
+  const pyImportEdges = pyResult.edges.filter((e) => e.edge_type === "imports");
+  assert(
+    pyImportEdges.some((e) => e.to_name === "os"),
+    "Python analyzer records import edges",
   );
 
   // ── Cleanup ────────────────────────────────────────────

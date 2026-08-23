@@ -12,6 +12,7 @@ import { registerKnowledgeGraphTools } from "./tools/knowledge-graph.js";
 import { registerSpecsTools } from "./tools/specs.js";
 import { registerCodeGraphTools } from "./tools/code-graph.js";
 import { registerCodemapTools } from "./tools/codemap.js";
+import { registerListDeleteTools } from "./tools/list-delete.js";
 
 const VERSION = "0.1.0";
 
@@ -47,6 +48,7 @@ async function main(): Promise<void> {
   registerSpecsTools(server, db);
   registerCodeGraphTools(server, db, workspaceRoot);
   registerCodemapTools(server, db);
+  registerListDeleteTools(server, db);
 
   // Log to stderr (stdio transport uses stdout for protocol)
   console.error(
@@ -58,8 +60,10 @@ async function main(): Promise<void> {
   await server.connect(transport);
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error("Fatal error:", err);
   closeDatabase();
   process.exit(1);
-});
+}

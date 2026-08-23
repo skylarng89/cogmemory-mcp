@@ -87,6 +87,82 @@ export const RecallSchema = z.object({
     .describe("Max results per category (default 20)"),
 });
 
+// ─── RECALL HELPERS ───────────────────────────────────────
+
+interface RecallFilterOpts {
+  tags?: string;
+  session_id?: number;
+  since?: string;
+  hasSession: boolean;
+  hasTags: boolean;
+}
+
+function ftsSearch(
+  db: Database.Database,
+  table: string,
+  alias: string,
+  text: string,
+  opts: RecallFilterOpts,
+  lim: number,
+): unknown[] {
+  const conds: string[] = ["recall_fts MATCH ?", "rd.source = ?"];
+  const params: unknown[] = [text, table];
+
+  if (opts.since) {
+    conds.push("rd.created_at >= ?");
+    params.push(opts.since);
+  }
+  if (opts.hasTags && opts.tags) {
+    conds.push(`${alias}.tags LIKE ?`);
+    params.push(`%${opts.tags}%`);
+  }
+  if (opts.hasSession && opts.session_id !== undefined) {
+    conds.push(`${alias}.session_id = ?`);
+    params.push(opts.session_id);
+  }
+
+  const sql = `
+    SELECT ${alias}.* FROM recall_fts fts
+    JOIN recall_docs rd ON rd.id = fts.rowid
+    JOIN ${table} ${alias} ON ${alias}.id = rd.doc_id
+    WHERE ${conds.join(" AND ")}
+    ORDER BY fts.rank
+    LIMIT ?
+  `;
+  return db.prepare(sql).all(...params, lim);
+}
+
+function filteredQuery(
+  db: Database.Database,
+  table: string,
+  opts: RecallFilterOpts,
+  lim: number,
+  sortColumn = "created_at",
+): unknown[] {
+  const conds: string[] = [];
+  const params: unknown[] = [];
+
+  if (opts.hasTags && opts.tags) {
+    conds.push("tags LIKE ?");
+    params.push(`%${opts.tags}%`);
+  }
+  if (opts.hasSession && opts.session_id !== undefined) {
+    conds.push("session_id = ?");
+    params.push(opts.session_id);
+  }
+  if (opts.since) {
+    conds.push("created_at >= ?");
+    params.push(opts.since);
+  }
+
+  const where = conds.length > 0 ? `WHERE ${conds.join(" AND ")}` : "";
+  return db
+    .prepare(
+      `SELECT * FROM ${table} ${where} ORDER BY ${sortColumn} DESC LIMIT ?`,
+    )
+    .all(...params, lim);
+}
+
 // ─── TOOL REGISTRATION ────────────────────────────────────
 
 export function registerMemoryTools(
@@ -326,148 +402,64 @@ export function registerMemoryTools(
       const results: Record<string, unknown[]> = {};
 
       if (text) {
-        // FTS5 full-text search — joins recall_fts → recall_docs → source table
-        const sourceConfigs = [
-          {
-            key: "decisions",
-            table: "decisions",
-            alias: "d",
-            hasSession: true,
-            hasTags: true,
-          },
-          {
-            key: "conventions",
-            table: "conventions",
-            alias: "c",
-            hasSession: false,
-            hasTags: true,
-          },
-          {
-            key: "errors",
-            table: "errors",
-            alias: "e",
-            hasSession: true,
-            hasTags: true,
-          },
-          {
-            key: "changelog",
-            table: "changelog",
-            alias: "ch",
-            hasSession: true,
-            hasTags: false,
-          },
-        ];
-
-        for (const cfg of sourceConfigs) {
-          const conds: string[] = ["recall_fts MATCH ?", "rd.source = ?"];
-          const params: unknown[] = [text, cfg.key];
-
-          if (since) {
-            conds.push("rd.created_at >= ?");
-            params.push(since);
-          }
-          if (cfg.hasTags && tags) {
-            conds.push(`${cfg.alias}.tags LIKE ?`);
-            params.push(`%${tags}%`);
-          }
-          if (cfg.hasSession && session_id !== undefined) {
-            conds.push(`${cfg.alias}.session_id = ?`);
-            params.push(session_id);
-          }
-
-          const sql = `
-            SELECT ${cfg.alias}.* FROM recall_fts fts
-            JOIN recall_docs rd ON rd.id = fts.rowid
-            JOIN ${cfg.table} ${cfg.alias} ON ${cfg.alias}.id = rd.doc_id
-            WHERE ${conds.join(" AND ")}
-            ORDER BY fts.rank
-            LIMIT ?
-          `;
-          results[cfg.key] = db.prepare(sql).all(...params, lim);
-        }
+        results.decisions = ftsSearch(
+          db,
+          "decisions",
+          "d",
+          text,
+          { tags, session_id, since, hasSession: true, hasTags: true },
+          lim,
+        );
+        results.conventions = ftsSearch(
+          db,
+          "conventions",
+          "c",
+          text,
+          { tags, session_id, since, hasSession: false, hasTags: true },
+          lim,
+        );
+        results.errors = ftsSearch(
+          db,
+          "errors",
+          "e",
+          text,
+          { tags, session_id, since, hasSession: true, hasTags: true },
+          lim,
+        );
+        results.changelog = ftsSearch(
+          db,
+          "changelog",
+          "ch",
+          text,
+          { tags, session_id, since, hasSession: true, hasTags: false },
+          lim,
+        );
       } else {
-        // No text — tag/session/date filters only (LIKE fallback)
-        const tagsLike = tags ? `%${tags}%` : null;
-
-        const decConds: string[] = [];
-        const decParams: unknown[] = [];
-        if (tagsLike) {
-          decConds.push("tags LIKE ?");
-          decParams.push(tagsLike);
-        }
-        if (session_id !== undefined) {
-          decConds.push("session_id = ?");
-          decParams.push(session_id);
-        }
-        if (since) {
-          decConds.push("created_at >= ?");
-          decParams.push(since);
-        }
-        const decWhere =
-          decConds.length > 0 ? `WHERE ${decConds.join(" AND ")}` : "";
-        results.decisions = db
-          .prepare(
-            `SELECT * FROM decisions ${decWhere} ORDER BY created_at DESC LIMIT ?`,
-          )
-          .all(...decParams, lim);
-
-        const convConds: string[] = [];
-        const convParams: unknown[] = [];
-        if (tagsLike) {
-          convConds.push("tags LIKE ?");
-          convParams.push(tagsLike);
-        }
-        if (since) {
-          convConds.push("created_at >= ?");
-          convParams.push(since);
-        }
-        const convWhere =
-          convConds.length > 0 ? `WHERE ${convConds.join(" AND ")}` : "";
-        results.conventions = db
-          .prepare(
-            `SELECT * FROM conventions ${convWhere} ORDER BY updated_at DESC LIMIT ?`,
-          )
-          .all(...convParams, lim);
-
-        const errConds: string[] = [];
-        const errParams: unknown[] = [];
-        if (tagsLike) {
-          errConds.push("tags LIKE ?");
-          errParams.push(tagsLike);
-        }
-        if (session_id !== undefined) {
-          errConds.push("session_id = ?");
-          errParams.push(session_id);
-        }
-        if (since) {
-          errConds.push("created_at >= ?");
-          errParams.push(since);
-        }
-        const errWhere =
-          errConds.length > 0 ? `WHERE ${errConds.join(" AND ")}` : "";
-        results.errors = db
-          .prepare(
-            `SELECT * FROM errors ${errWhere} ORDER BY created_at DESC LIMIT ?`,
-          )
-          .all(...errParams, lim);
-
-        const changeConds: string[] = [];
-        const changeParams: unknown[] = [];
-        if (session_id !== undefined) {
-          changeConds.push("session_id = ?");
-          changeParams.push(session_id);
-        }
-        if (since) {
-          changeConds.push("created_at >= ?");
-          changeParams.push(since);
-        }
-        const changeWhere =
-          changeConds.length > 0 ? `WHERE ${changeConds.join(" AND ")}` : "";
-        results.changelog = db
-          .prepare(
-            `SELECT * FROM changelog ${changeWhere} ORDER BY created_at DESC LIMIT ?`,
-          )
-          .all(...changeParams, lim);
+        results.decisions = filteredQuery(
+          db,
+          "decisions",
+          { tags, session_id, since, hasSession: true, hasTags: true },
+          lim,
+        );
+        results.conventions = filteredQuery(
+          db,
+          "conventions",
+          { tags, session_id, since, hasSession: false, hasTags: true },
+          lim,
+          "updated_at",
+        );
+        results.errors = filteredQuery(
+          db,
+          "errors",
+          { tags, session_id, since, hasSession: true, hasTags: true },
+          lim,
+        );
+        results.changelog = filteredQuery(
+          db,
+          "changelog",
+          { tags, session_id, since, hasSession: true, hasTags: false },
+          lim,
+        );
       }
 
       const totalResults =
