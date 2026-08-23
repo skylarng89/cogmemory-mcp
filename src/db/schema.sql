@@ -172,6 +172,65 @@ CREATE INDEX IF NOT EXISTS idx_specs_entity ON specs(entity_id);
 CREATE INDEX IF NOT EXISTS idx_specs_title  ON specs(title);
 
 ------------------------------------------------------------
+-- KNOWLEDGE GRAPH: FTS5 full-text search index
+-- kg_docs is a content table shadowed by kg_fts (FTS5 virtual table).
+-- Triggers on entities/observations keep kg_docs (and thus kg_fts) in sync.
+------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS kg_docs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  source     TEXT NOT NULL,           -- 'entities' | 'observations'
+  doc_id     INTEGER NOT NULL,        -- FK to source table row id
+  body       TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(source, doc_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_docs_source ON kg_docs(source, doc_id);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS kg_fts USING fts5(
+  body,
+  content='kg_docs',
+  content_rowid='id'
+);
+
+-- kg_docs → kg_fts sync triggers
+CREATE TRIGGER IF NOT EXISTS trg_kg_docs_ai AFTER INSERT ON kg_docs BEGIN
+  INSERT INTO kg_fts(rowid, body) VALUES (new.id, new.body);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_kg_docs_ad AFTER DELETE ON kg_docs BEGIN
+  INSERT INTO kg_fts(kg_fts, rowid, body) VALUES ('delete', old.id, old.body);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_kg_docs_au AFTER UPDATE ON kg_docs BEGIN
+  INSERT INTO kg_fts(kg_fts, rowid, body) VALUES ('delete', old.id, old.body);
+  INSERT INTO kg_fts(rowid, body) VALUES (new.id, new.body);
+END;
+
+-- entities → kg_docs sync triggers
+CREATE TRIGGER IF NOT EXISTS trg_entities_fts_ai AFTER INSERT ON entities BEGIN
+  INSERT OR IGNORE INTO kg_docs(source, doc_id, body, created_at)
+  VALUES ('entities', NEW.id, NEW.name || ' ' || NEW.type, NEW.created_at); -- NOSONAR
+END;
+CREATE TRIGGER IF NOT EXISTS trg_entities_fts_ad AFTER DELETE ON entities BEGIN
+  DELETE FROM kg_docs WHERE source = 'entities' AND doc_id = OLD.id; -- NOSONAR
+END;
+CREATE TRIGGER IF NOT EXISTS trg_entities_fts_au AFTER UPDATE ON entities BEGIN
+  UPDATE kg_docs SET body = NEW.name || ' ' || NEW.type
+  WHERE source = 'entities' AND doc_id = OLD.id; -- NOSONAR
+END;
+
+-- observations → kg_docs sync triggers
+CREATE TRIGGER IF NOT EXISTS trg_observations_fts_ai AFTER INSERT ON observations BEGIN
+  INSERT OR IGNORE INTO kg_docs(source, doc_id, body, created_at)
+  VALUES ('observations', NEW.id, NEW.content, NEW.created_at); -- NOSONAR
+END;
+CREATE TRIGGER IF NOT EXISTS trg_observations_fts_ad AFTER DELETE ON observations BEGIN
+  DELETE FROM kg_docs WHERE source = 'observations' AND doc_id = OLD.id; -- NOSONAR
+END;
+CREATE TRIGGER IF NOT EXISTS trg_observations_fts_au AFTER UPDATE ON observations BEGIN
+  UPDATE kg_docs SET body = NEW.content, created_at = NEW.created_at
+  WHERE source = 'observations' AND doc_id = OLD.id; -- NOSONAR
+END;
+
+------------------------------------------------------------
 -- CODE GRAPH: file_index (mtime tracking for incremental indexing)
 ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS file_index (

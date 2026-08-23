@@ -35,7 +35,9 @@ export const SearchKnowledgeSchema = z.object({
   entity_name: z
     .string()
     .optional()
-    .describe("Search entities by name (LIKE match)"),
+    .describe(
+      "Search entities by name (FTS5 match — supports AND/OR/NOT, phrase)",
+    ),
   entity_type: z.string().optional().describe("Filter entities by exact type"),
   relation_type: z
     .string()
@@ -44,7 +46,9 @@ export const SearchKnowledgeSchema = z.object({
   observation_text: z
     .string()
     .optional()
-    .describe("Search observations by text (LIKE match)"),
+    .describe(
+      "Search observations by text (FTS5 match — supports AND/OR/NOT, phrase)",
+    ),
   limit: z
     .number()
     .int()
@@ -232,56 +236,61 @@ export function registerKnowledgeGraphTools(
         const lim = limit ?? 50;
         const results: Record<string, unknown[]> = {};
 
-        // Entities
-        const entConds: string[] = [];
-        const entParams: unknown[] = [];
-        if (entity_name) {
-          entConds.push("name LIKE ?");
-          entParams.push(`%${entity_name}%`);
-        }
-        if (entity_type) {
-          entConds.push("type = ?");
-          entParams.push(entity_type);
-        }
-        const entWhere =
-          entConds.length > 0 ? `WHERE ${entConds.join(" AND ")}` : "";
-        results.entities = db
-          .prepare(
-            `SELECT * FROM entities ${entWhere} ORDER BY created_at DESC LIMIT ?`,
-          )
-          .all(...entParams, lim);
+        // Entities — use FTS5 for name search, exact match for type
+        if (entity_name || entity_type) {
+          const entConds: string[] = [];
+          const entParams: unknown[] = [];
 
-        // Relations
-        const relConds: string[] = [];
-        const relParams: unknown[] = [];
+          if (entity_name) {
+            // FTS5 MATCH on entity names
+            entConds.push(
+              "e.id IN (SELECT doc_id FROM kg_docs kd JOIN kg_fts kf ON kf.rowid = kd.id WHERE kg_fts MATCH ? AND kd.source = 'entities')",
+            );
+            entParams.push(entity_name);
+          }
+          if (entity_type) {
+            entConds.push("e.type = ?");
+            entParams.push(entity_type);
+          }
+
+          const entWhere =
+            entConds.length > 0 ? `WHERE ${entConds.join(" AND ")}` : "";
+          results.entities = db
+            .prepare(
+              `SELECT e.* FROM entities e ${entWhere} ORDER BY e.created_at DESC LIMIT ?`,
+            )
+            .all(...entParams, lim);
+        } else {
+          results.entities = [];
+        }
+
+        // Relations — keep LIKE for relation_type (it's simple and fast on this column)
         if (relation_type) {
-          relConds.push("relation_type LIKE ?");
-          relParams.push(`%${relation_type}%`);
+          results.relations = db
+            .prepare(
+              `SELECT r.*, fe.name as from_name, fe.type as from_type, te.name as to_name, te.type as to_type
+             FROM relations r
+             JOIN entities fe ON r.from_entity_id = fe.id
+             JOIN entities te ON r.to_entity_id = te.id
+             WHERE r.relation_type LIKE ?
+             ORDER BY r.created_at DESC LIMIT ?`,
+            )
+            .all(`%${relation_type}%`, lim);
+        } else {
+          results.relations = [];
         }
-        const relWhere =
-          relConds.length > 0 ? `WHERE ${relConds.join(" AND ")}` : "";
-        results.relations = db
-          .prepare(
-            `SELECT r.*, fe.name as from_name, fe.type as from_type, te.name as to_name, te.type as to_type
-           FROM relations r
-           JOIN entities fe ON r.from_entity_id = fe.id
-           JOIN entities te ON r.to_entity_id = te.id
-           ${relWhere}
-           ORDER BY r.created_at DESC LIMIT ?`,
-          )
-          .all(...relParams, lim);
 
-        // Observations
+        // Observations — use FTS5 for text search
         if (observation_text) {
           results.observations = db
             .prepare(
               `SELECT o.*, e.name as entity_name, e.type as entity_type
              FROM observations o
              JOIN entities e ON o.entity_id = e.id
-             WHERE o.content LIKE ?
+             WHERE o.id IN (SELECT doc_id FROM kg_docs kd JOIN kg_fts kf ON kf.rowid = kd.id WHERE kg_fts MATCH ? AND kd.source = 'observations')
              ORDER BY o.created_at DESC LIMIT ?`,
             )
-            .all(`%${observation_text}%`, lim);
+            .all(observation_text, lim);
         } else {
           results.observations = [];
         }
