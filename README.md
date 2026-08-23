@@ -185,12 +185,22 @@ export COGMEMORY_SCOPE=global
 
 ### Code Graph Tools
 
-| Tool               | Description                                                                |
-| ------------------ | -------------------------------------------------------------------------- |
-| `index_codebase`   | Walk workspace, extract symbols + edges via ts-morph (JS/TS)               |
-| `query_code_graph` | Look up a symbol's callers/callees/imports (1-hop)                         |
-| `generate_codemap` | BFS from entry symbol, bounded subgraph with optional traces + annotations |
-| `annotate_symbol`  | Attach narrative text to a symbol or trace                                 |
+| Tool               | Description                                                                          |
+| ------------------ | ------------------------------------------------------------------------------------ |
+| `index_codebase`   | Walk workspace, extract symbols + edges (JS/TS via ts-morph, Python via tree-sitter) |
+| `query_code_graph` | Look up a symbol's callers/callees/imports (1-hop)                                   |
+| `generate_codemap` | BFS from entry symbol, bounded subgraph with optional traces + annotations           |
+| `annotate_symbol`  | Attach narrative text to a symbol or trace                                           |
+
+### List & Delete Tools
+
+| Tool              | Description                                                    |
+| ----------------- | -------------------------------------------------------------- |
+| `list_items`      | Browse stored entries from any subsystem with optional filters |
+| `delete_item`     | Delete a single row by ID from any subsystem                   |
+| `delete_by_key`   | Delete a context entry by its string key                       |
+| `delete_by_path`  | Remove a file from the code graph file_index                   |
+| `purge_subsystem` | Remove ALL rows from a subsystem (requires `confirm=true`)     |
 
 ---
 
@@ -213,9 +223,12 @@ cogmemory-mcp/
 │   │   ├── knowledge-graph.ts   # entities/relations/observations
 │   │   ├── specs.ts             # spec CRUD
 │   │   ├── code-graph.ts        # index_codebase, query_code_graph
-│   │   └── codemap.ts           # generate_codemap, annotate_symbol
+│   │   ├── codemap.ts           # generate_codemap, annotate_symbol
+│   │   ├── list-delete.ts       # list_items, delete_item, purge_subsystem
+│   │   └── utils.ts             # wrapHandler, jsonOk, jsonFail, jsonErr
 │   └── indexing/
-│       ├── ts-analyzer.ts       # ts-morph symbol/edge extraction
+│       ├── ts-analyzer.ts       # ts-morph symbol/edge extraction (JS/TS)
+│       ├── py-analyzer.ts       # tree-sitter symbol/edge extraction (Python)
 │       └── walker.ts            # file discovery, gitignore respect
 ├── schema.sql                   # reference copy
 ├── package.json
@@ -225,12 +238,14 @@ cogmemory-mcp/
 
 ---
 
-## Schema (15 tables)
+## Schema (17 tables + 2 FTS5 virtual tables)
 
 - **Memory (8):** `sessions`, `decisions`, `conventions`, `errors`, `context`, `changelog`, `plan`, `tasks`
 - **Knowledge Graph (3):** `entities`, `relations`, `observations`
+- **Knowledge Graph FTS5 (2):** `kg_docs` (content table), `kg_fts` (FTS5 virtual table)
 - **Specs (1):** `specs`
 - **Code Graph (4):** `symbols`, `edges`, `execution_traces`, `codemap_annotations`
+- **Code Graph Index (1):** `file_index`
 
 ---
 
@@ -260,3 +275,23 @@ pnpm run smoke-test # Run smoke test script
 ## License
 
 MIT
+
+---
+
+## Supported Languages
+
+The Code Graph (`index_codebase`) extracts symbols and edges from source files using language-specific analyzers:
+
+| Language   | Extensions                    | Analyzer    | Symbols Extracted                                                              |
+| ---------- | ----------------------------- | ----------- | ------------------------------------------------------------------------------ |
+| TypeScript | `.ts`, `.tsx`                 | ts-morph    | files, functions, classes, interfaces, methods, type aliases, enums, variables |
+| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | ts-morph    | files, functions, classes, methods, variables                                  |
+| Python     | `.py`                         | tree-sitter | files, functions, classes, methods                                             |
+
+**Edges extracted:** calls, imports, extends, implements (all languages).
+
+To index additional file types, pass `extensions` to `index_codebase`:
+
+```json
+{ "extensions": ["ts", "tsx", "js", "jsx", "py"] }
+```
