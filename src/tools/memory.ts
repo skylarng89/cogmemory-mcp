@@ -3,7 +3,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler } from "./utils.js";
+import { wrapHandler, resolveSessionId } from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -184,7 +184,7 @@ export function registerMemoryTools(
         VALUES (?, ?, ?, ?)
       `);
         const result = stmt.run(
-          session_id ?? null,
+          resolveSessionId(db, session_id),
           title,
           rationale ?? null,
           tags ?? null,
@@ -270,7 +270,7 @@ export function registerMemoryTools(
         VALUES (?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
-          session_id ?? null,
+          resolveSessionId(db, session_id),
           error_signature,
           description ?? null,
           resolution ?? null,
@@ -373,7 +373,7 @@ export function registerMemoryTools(
         INSERT INTO changelog (session_id, summary, ref)
         VALUES (?, ?, ?)
       `);
-      const result = stmt.run(session_id ?? null, summary, ref ?? null);
+      const result = stmt.run(resolveSessionId(db, session_id), summary, ref ?? null);
       return {
         content: [
           {
