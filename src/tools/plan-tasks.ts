@@ -3,7 +3,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler } from "./utils.js";
+import { wrapHandler, resolveSessionId, resolvePlanId } from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -143,8 +143,8 @@ export function registerPlanTasksTools(
         VALUES (?, ?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
-          plan_id ?? null,
-          session_id ?? null,
+          resolvePlanId(db, plan_id),
+          resolveSessionId(db, session_id),
           title,
           description ?? null,
           status ?? "todo",
