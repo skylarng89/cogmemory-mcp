@@ -7,7 +7,10 @@ import { walkFilesWithMtime } from "../indexing/walker.js";
 import { analyzeFiles } from "../indexing/ts-analyzer.js";
 import { analyzePythonFiles } from "../indexing/py-analyzer.js";
 import { resolve, extname } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { wrapHandler, jsonOk } from "./utils.js";
+import { EDGE_TYPES, STRUCTURAL_EDGE_TYPES } from "../indexing/edge-types.js";
 
 /** Extensions handled by the ts-morph (JS/TS) analyzer. */
 const TS_EXTENSIONS = new Set(["ts", "tsx", "js", "jsx", "mjs", "cjs"]);
@@ -49,6 +52,59 @@ function analyzeMixed(files: string[], rootDir: string) {
   };
 }
 
+// ─── Tokenizer (same as code-analysis.ts) ───────────────
+
+const STOPWORDS = new Set([
+  "the","a","an","is","are","was","were","be","been","being",
+  "have","has","had","do","does","did","will","would","could",
+  "should","may","might","must","shall","can","need","to","of",
+  "in","for","on","with","at","by","from","as","into","through",
+  "during","before","after","above","below","between","out","off",
+  "under","again","further","then","once","here","there","when",
+  "where","why","how","all","both","each","few","more","most",
+  "other","some","such","no","nor","not","only","own","same",
+  "so","than","too","very","just","because","but","and","or",
+  "if","while","this","that","these","those","i","me","my",
+  "we","our","you","your","he","him","his","she","her","it",
+  "its","they","them","their","what","which","who","whom",
+  "function","const","let","var","return","import","from","export",
+  "default","class","interface","type","enum","async","await",
+  "def","self","lambda","yield","pass","raise","try","except",
+  "finally","with","as","global","nonlocal","assert","del",
+]);
+
+function tokenizeSymbolBody(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length >= 2 && !STOPWORDS.has(t));
+}
+
+function computeBodyHash(bodyText: string): string {
+  return createHash("sha256").update(bodyText).digest("hex").slice(0, 16);
+}
+
+// ─── Schema-aware column check ──────────────────────────
+
+function tableHasColumn(db: Database.Database, table: string, column: string): boolean {
+  try {
+    const cols = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
+    return cols.some((c) => c.name === column);
+  } catch {
+    return false;
+  }
+}
+
+function tableExists(db: Database.Database, table: string): boolean {
+  try {
+    db.prepare(`SELECT 1 FROM ${table} LIMIT 0`).get();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ─── Index helper functions ───────────────────────────────
 
 interface ClassifyResult {
@@ -66,6 +122,9 @@ function classifyFiles(
     db.exec("DELETE FROM edges");
     db.exec("DELETE FROM symbols");
     db.exec("DELETE FROM file_index");
+    // Also clear derived tables if they exist
+    try { db.exec("DELETE FROM symbol_tokens"); } catch { /* table may not exist */ }
+    try { db.exec("DELETE FROM symbol_minhash"); } catch { /* table may not exist */ }
     return { filesToAnalyze: [...currentFiles.keys()], deletedFiles: [] };
   }
 
@@ -155,23 +214,105 @@ function analyzeAndInsert(
 
   const result = analyzeMixed(filesToAnalyze, targetDir);
 
-  const insertSymbol = db.prepare(`
-    INSERT INTO symbols (file_path, symbol_name, symbol_type, start_line, end_line)
-    VALUES (?, ?, ?, ?, ?)
-  `);
+  // Detect schema capabilities
+  const hasExported = tableHasColumn(db, "symbols", "is_exported");
+  const hasBodyHash = tableHasColumn(db, "symbols", "body_hash");
+  const hasTokenCount = tableHasColumn(db, "symbols", "token_count");
+  const hasTokensTable = tableExists(db, "symbol_tokens");
+
+  // Prepare the correct INSERT statement based on available columns
+  let insertSymbol: Database.Statement;
+  if (hasExported && hasBodyHash && hasTokenCount) {
+    insertSymbol = db.prepare(`
+      INSERT INTO symbols (file_path, symbol_name, symbol_type, start_line, end_line, is_exported, body_hash, token_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+  } else {
+    insertSymbol = db.prepare(`
+      INSERT INTO symbols (file_path, symbol_name, symbol_type, start_line, end_line)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+  }
+
+  // Prepare token insert if table exists
+  const insertToken = hasTokensTable
+    ? db.prepare("INSERT OR IGNORE INTO symbol_tokens (symbol_id, token, tf) VALUES (?, ?, ?)")
+    : null;
+
+  const fileCache = new Map<string, string[]>();
+
+  function getFileLines(filePath: string): string[] {
+    if (fileCache.has(filePath)) return fileCache.get(filePath)!;
+    const absPath = resolve(targetDir, filePath);
+    let lines: string[];
+    try {
+      if (existsSync(absPath)) {
+        lines = readFileSync(absPath, "utf-8").split("\n");
+      } else {
+        lines = [];
+      }
+    } catch {
+      lines = [];
+    }
+    fileCache.set(filePath, lines);
+    return lines;
+  }
+
   db.transaction(() => {
     for (const sym of result.symbols) {
-      const r = insertSymbol.run(
-        sym.file_path,
-        sym.symbol_name,
-        sym.symbol_type,
-        sym.start_line,
-        sym.end_line,
-      );
+      // Extract source code for body_hash / tokenization
+      const lines = getFileLines(sym.file_path);
+      const startLine = sym.start_line ?? 1;
+      const endLine = sym.end_line ?? lines.length;
+      const bodyText = lines.slice(startLine - 1, endLine).join("\n");
+
+      const isExported = sym.is_exported ? 1 : 0;
+      const bodyHash = bodyText.length > 0 ? computeBodyHash(bodyText) : null;
+      const tokens = bodyText.length > 0 ? tokenizeSymbolBody(bodyText) : [];
+      const tokenCount = tokens.length;
+
+      let symbolId: number;
+      if (hasExported && hasBodyHash && hasTokenCount) {
+        const r = insertSymbol.run(
+          sym.file_path,
+          sym.symbol_name,
+          sym.symbol_type,
+          sym.start_line,
+          sym.end_line,
+          isExported,
+          bodyHash,
+          tokenCount,
+        );
+        symbolId = r.lastInsertRowid as number;
+      } else {
+        const r = insertSymbol.run(
+          sym.file_path,
+          sym.symbol_name,
+          sym.symbol_type,
+          sym.start_line,
+          sym.end_line,
+        );
+        symbolId = r.lastInsertRowid as number;
+      }
+
       symbolIdMap.set(
         `${sym.file_path}:${sym.symbol_name}:${sym.start_line}`,
-        r.lastInsertRowid as number,
+        symbolId,
       );
+
+      // Populate symbol_tokens for TF-IDF
+      if (insertToken && tokenCount > 0) {
+        // Compute term frequency
+        const termFreq = new Map<string, number>();
+        for (const token of tokens) {
+          termFreq.set(token, (termFreq.get(token) ?? 0) + 1);
+        }
+        // Normalize TF
+        for (const [token, count] of termFreq) {
+          const tf = count / tokenCount;
+          insertToken.run(symbolId, token, tf);
+        }
+      }
     }
   })();
 
