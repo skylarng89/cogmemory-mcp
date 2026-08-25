@@ -34,75 +34,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Determine version bump
-        id: bump
-        run: |
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -z "$LAST_TAG" ]; then
-            COMMITS=$(git log --format="%s" HEAD)
-          else
-            COMMITS=$(git log --format="%s" "${LAST_TAG}..HEAD")
-          fi
-
-          echo "Commits since last tag:"
-          echo "$COMMITS"
-
-          BUMP="none"
-          if echo "$COMMITS" | grep -qiE '^[a-z]+(\(.+\))?!:|BREAKING CHANGE'; then
-            BUMP="major"
-          elif echo "$COMMITS" | grep -qiE '^feat(\(.+\))?:'; then
-            BUMP="minor"
-          elif echo "$COMMITS" | grep -qiE '^(fix|perf|refactor|revert|chore)(\(.+\))?:'; then
-            BUMP="patch"
-          fi
-
-          echo "Detected bump: $BUMP"
-          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
-
-      - name: Bump version (local only — not committed)
-        if: steps.bump.outputs.bump != 'none'
+      - name: Read version from package.json
         id: version
         run: |
-          CURRENT=$(node -p "require('./package.json').version")
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-
-          case "${{ steps.bump.outputs.bump }}" in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH + 1)) ;;
-          esac
-
-          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
-          echo "Bumping $CURRENT → $NEW_VERSION"
-          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
-
-          # Patch package.json — never committed, only used for build + publish
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            pkg.version = '$NEW_VERSION';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
-
-          # Patch server.json — never committed, only used for build + publish
-          node -e "
-            const fs = require('fs');
-            const srv = JSON.parse(fs.readFileSync('server.json', 'utf-8'));
-            srv.version = '$NEW_VERSION';
-            srv.packages[0].version = '$NEW_VERSION';
-            fs.writeFileSync('server.json', JSON.stringify(srv, null, 2) + '\n');
-          "
-
-      - name: Build
-        if: steps.bump.outputs.bump != 'none'
-        run: pnpm run build
-
-      - name: Smoke test
-        if: steps.bump.outputs.bump != 'none'
-        run: pnpm run smoke-test
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
 
       - name: Check if tag already exists
-        if: steps.bump.outputs.bump != 'none'
         id: tag_check
         run: |
           TAG="v${{ steps.version.outputs.version }}"
@@ -113,8 +52,16 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Build
+        if: steps.tag_check.outputs.exists != 'true'
+        run: pnpm run build
+
+      - name: Smoke test
+        if: steps.tag_check.outputs.exists != 'true'
+        run: pnpm run smoke-test
+
       - name: Create tag
-        if: steps.bump.outputs.bump != 'none' && steps.tag_check.outputs.exists != 'true'
+        if: steps.tag_check.outputs.exists != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -122,35 +69,32 @@ jobs:
           git push origin "v${{ steps.version.outputs.version }}"
 
       - name: Publish to npm (Trusted Publisher)
-        if: steps.bump.outputs.bump != 'none' && steps.tag_check.outputs.exists != 'true'
+        if: steps.tag_check.outputs.exists != 'true'
         run: npm publish --provenance --access public
 
       - name: Install mcp-publisher
-        if: steps.bump.outputs.bump != 'none' && steps.tag_check.outputs.exists != 'true'
+        if: steps.tag_check.outputs.exists != 'true'
         run: |
           curl --proto "=https" --tlsv1.2 -sSf -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
 
       - name: Authenticate to MCP Registry (OIDC)
-        if: steps.bump.outputs.bump != 'none' && steps.tag_check.outputs.exists != 'true'
+        if: steps.tag_check.outputs.exists != 'true'
         run: ./mcp-publisher login github-oidc
 
       - name: Publish to MCP Registry
-        if: steps.bump.outputs.bump != 'none' && steps.tag_check.outputs.exists != 'true'
+        if: steps.tag_check.outputs.exists != 'true'
         run: ./mcp-publisher publish
 
       - name: Summary
         if: always()
         run: |
-          BUMP="${{ steps.bump.outputs.bump }}"
           VERSION="${{ steps.version.outputs.version }}"
           TAG_EXISTS="${{ steps.tag_check.outputs.exists }}"
 
           {
             echo "## 📦 Publish Summary"
             echo ""
-            if [ "$BUMP" = "none" ]; then
-              echo "**Result:** Skipped — no conventional commit detected since last tag."
-            elif [ "$TAG_EXISTS" = "true" ]; then
+            if [ "$TAG_EXISTS" = "true" ]; then
               echo "**Result:** Skipped — tag \`v${VERSION}\` already exists."
             else
               echo "**Result:** Published \`v${VERSION}\`"
@@ -162,6 +106,6 @@ jobs:
               echo "| Git tag | ✅ \`v${VERSION}\` pushed |"
             fi
             echo ""
-            echo "**Bump type:** \`${BUMP}\`"
+            echo "**Version source:** \`package.json\` (single source of truth)"
             echo "**Commit:** \`${GITHUB_SHA::7}\`"
           } >> "$GITHUB_STEP_SUMMARY"
