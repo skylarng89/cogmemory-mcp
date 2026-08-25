@@ -1,13 +1,13 @@
 // CogMemory MCP — Database connection with pragma setup
 
 import Database from "better-sqlite3";
-import { migrate } from "./migrate.js";
+import { runMigrations } from "./migration-runner.js";
 
 let db: Database.Database | null = null;
 
 /**
  * Open (or return existing) database connection with WAL + foreign_keys pragmas.
- * Runs schema migration on every open for idempotent setup.
+ * Runs versioned schema migrations on every open (pending migrations only).
  */
 export function openDatabase(dbPath: string): Database.Database {
   if (db) {
@@ -20,8 +20,8 @@ export function openDatabase(dbPath: string): Database.Database {
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
 
-  // Run migration
-  migrate(db);
+  // Run versioned migrations (applies pending migrations only; idempotent for up-to-date DBs)
+  runMigrations(db, dbPath);
 
   return db;
 }
