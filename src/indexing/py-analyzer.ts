@@ -33,6 +33,8 @@ interface WalkCtx {
   symbols: ExtractedSymbol[];
   edges: ExtractedEdge[];
   symbolIndex: Map<string, ExtractedSymbol>;
+  /** Set of names from `__all__` list, if present in the file. */
+  allNames: Set<string> | null;
 }
 
 /**
@@ -63,6 +65,9 @@ export function analyzePythonFiles(
     const tree = parserInstance.parse(source);
     const filePath = relative(rootDir, file);
 
+    // Extract __all__ if present
+    const allNames = extractAllNames(tree.rootNode);
+
     symbols.push({
       file_path: filePath,
       symbol_name: filePath,
@@ -71,7 +76,7 @@ export function analyzePythonFiles(
       end_line: source.split("\n").length,
     });
 
-    const ctx: WalkCtx = { filePath, symbols, edges, symbolIndex };
+    const ctx: WalkCtx = { filePath, symbols, edges, symbolIndex, allNames };
     walkNode(tree.rootNode, ctx, null);
   }
 
@@ -85,6 +90,7 @@ function makeSymbol(
   name: string,
   type: string,
   node: TSNode,
+  isExported: boolean = false,
 ): ExtractedSymbol {
   return {
     file_path: filePath,
@@ -92,12 +98,27 @@ function makeSymbol(
     symbol_type: type,
     start_line: node.startPosition.row + 1,
     end_line: node.endPosition.row + 1,
+    is_exported: isExported,
   };
 }
 
 function registerSymbol(ctx: WalkCtx, sym: ExtractedSymbol): void {
   ctx.symbols.push(sym);
   ctx.symbolIndex.set(`${ctx.filePath}:${sym.symbol_name}`, sym);
+}
+
+/**
+ * Dual export rule for Python:
+ * (a) If __all__ is present, a symbol is exported iff its name appears in __all__.
+ * (b) Otherwise, a top-level def/class is exported iff its name does not start with _.
+ */
+function isExportedByRule(ctx: WalkCtx, name: string, isTopLevel: boolean): boolean {
+  if (ctx.allNames !== null) {
+    // __all__ is authoritative
+    return ctx.allNames.has(name);
+  }
+  // Fallback: non-underscored top-level names are exported
+  return isTopLevel && !name.startsWith("_");
 }
 
 function pushEdge(
@@ -126,6 +147,33 @@ function childText(node: TSNode, fieldName: string): string {
 
 // ─── Node-type handlers ──────────────────────────────────
 
+/**
+ * Extract names from `__all__ = [...]` assignment if present.
+ * Returns null if no __all__ found.
+ */
+function extractAllNames(rootNode: TSNode): Set<string> | null {
+  for (const child of rootNode.children) {
+    if (child.type !== "expression_statement") continue;
+    const expr = child.childForFieldName("body") ?? child.children[0];
+    if (!expr || expr.type !== "assignment") continue;
+    const left = expr.childForFieldName("left");
+    if (!left || left.text !== "__all__") continue;
+    const right = expr.childForFieldName("right");
+    if (!right) continue;
+    const names = new Set<string>();
+    // __all__ can be a list or tuple
+    for (const item of right.children) {
+      if (item.type === "string") {
+        // Strip quotes
+        const val = item.text.replace(/^['"bfru]*/, "").replace(/['"]+$/, "");
+        names.add(val);
+      }
+    }
+    return names.size > 0 ? names : null;
+  }
+  return null;
+}
+
 function handleFunctionDef(
   node: TSNode,
   ctx: WalkCtx,
@@ -133,6 +181,8 @@ function handleFunctionDef(
 ): void {
   const name = childText(node, "name");
   const isAsync = node.firstChild?.type === "async";
+  const isTopLevel = enclosingName === null;
+  const isExported = isExportedByRule(ctx, name, isTopLevel);
   registerSymbol(
     ctx,
     makeSymbol(
@@ -140,6 +190,7 @@ function handleFunctionDef(
       name,
       isAsync ? "async-function" : "function",
       node,
+      isExported,
     ),
   );
 
@@ -153,7 +204,8 @@ function handleFunctionDef(
 
 function handleClassDef(node: TSNode, ctx: WalkCtx): void {
   const name = childText(node, "name");
-  registerSymbol(ctx, makeSymbol(ctx.filePath, name, "class", node));
+  const isExported = isExportedByRule(ctx, name, true);
+  registerSymbol(ctx, makeSymbol(ctx.filePath, name, "class", node, isExported));
 
   extractInheritanceEdges(node, ctx, name);
   walkClassBody(node, ctx, name);
