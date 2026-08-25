@@ -136,7 +136,7 @@ const TABLES: TableMeta[] = [
   {
     subsystem: "edges",
     table: "edges",
-    description: "Code graph edges (calls/imports/extends/implements)",
+    description: "Code graph edges (calls/imports/extends/implements + SIMILAR_TO, SEMANTICALLY_RELATED)",
     hasSession: false,
     hasTags: false,
     sortColumn: "created_at",
@@ -164,6 +164,38 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "file_path",
+  },
+  {
+    subsystem: "index_errors",
+    table: "index_errors",
+    description: "Parse/IO errors from code graph indexing",
+    hasSession: false,
+    hasTags: false,
+    sortColumn: "occurred_at",
+  },
+  {
+    subsystem: "symbol_tokens",
+    table: "symbol_tokens",
+    description: "TF-IDF tokens for semantic code search",
+    hasSession: false,
+    hasTags: false,
+    sortColumn: "symbol_id",
+  },
+  {
+    subsystem: "symbol_minhash",
+    table: "symbol_minhash",
+    description: "MinHash signatures for clone detection",
+    hasSession: false,
+    hasTags: false,
+    sortColumn: "symbol_id",
+  },
+  {
+    subsystem: "symbol_embeddings",
+    table: "symbol_embeddings",
+    description: "Vector embeddings for symbols (Phase 2 stub)",
+    hasSession: false,
+    hasTags: false,
+    sortColumn: "symbol_id",
   },
 ];
 

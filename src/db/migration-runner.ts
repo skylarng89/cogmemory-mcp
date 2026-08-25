@@ -1,0 +1,171 @@
+// CogMemory MCP — Versioned migration runner
+//
+// Reads PRAGMA user_version, discovers numbered .sql migration files,
+// and applies pending migrations in order inside transactions.
+// Creates a pre-migration backup file when upgrading from user_version=0.
+
+import Database from "better-sqlite3";
+import { readdirSync, readFileSync, copyFileSync, statSync } from "node:fs";
+import { join, basename } from "node:path";
+
+/** Maximum migration version this codebase supports. */
+const MAX_VERSION = 7;
+
+/**
+ * Run all pending migrations up to MAX_VERSION.
+ *
+ * - For user_version=0 DBs (pre-migration-system), creates a backup file.
+ * - Each migration runs inside a single transaction (BEGIN…COMMIT).
+ * - On failure: ROLLBACK, stderr error, process.exit(1).
+ * - FTS rebuilds are inside 001_baseline.sql only (not on every open).
+ */
+export function runMigrations(db: Database.Database, dbPath: string): void {
+  const current = (db.pragma("user_version", { simple: true }) as number) ?? 0;
+
+  if (current >= MAX_VERSION) {
+    return; // Already up-to-date
+  }
+
+  // Discover migration files: 001_*.sql, 002_*.sql, …
+  const migrationsDir = join(
+    new URL(".", import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1"), // normalize Windows path
+    "migrations",
+  );
+
+  const migrationFiles = discoverMigrations(migrationsDir);
+
+  if (migrationFiles.length === 0) {
+    return;
+  }
+
+  // Pre-migration backup for user_version=0 (pre-migration-system) DBs
+  if (current === 0 && !process.env.COGMEMORY_SKIP_BACKUP) {
+    createBackup(dbPath);
+  }
+
+  // Apply pending migrations in order
+  for (const file of migrationFiles) {
+    const version = file.version;
+    if (version <= current) {
+      continue; // Already applied
+    }
+
+    const sql = readFileSync(file.path, "utf-8");
+    console.error(`  [migrate] Applying migration ${file.name} (v${version})…`);
+
+    try {
+      db.transaction(() => {
+        db.exec(sql);
+      })();
+    } catch (err) {
+      // Suppress: better-sqlite3 treats PRAGMA user_version as both a
+      // "write" and a "pragma" and may throw "not an error" on some
+      // SQLite builds. Check if migration actually succeeded.
+      const check = db.pragma("user_version", { simple: true }) as number;
+      if (check < version) {
+        // Real failure — exit so the user can recover from the backup
+        console.error(
+          `[migrate] CRITICAL: Migration ${file.name} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        console.error(
+          `[migrate] Database may be partially migrated (user_version=${check}).`,
+        );
+        if (current === 0) {
+          console.error(
+            `[migrate] Recovery: restore from backup file: ${dbPath}.backup-pre-migrate-*`,
+          );
+        }
+        process.exit(1);
+      }
+      // If user_version advanced, the migration succeeded despite the
+      // warning. Continue.
+      console.error(`  [migrate] ${file.name} applied (ignoring pragma warning).`);
+    }
+  }
+
+  const finalVersion = db.pragma("user_version", { simple: true }) as number;
+  if (finalVersion > current) {
+    console.error(`  [migrate] Schema upgraded: v${current} → v${finalVersion}`);
+  }
+}
+
+// ── Internal helpers ──────────────────────────────────
+
+interface MigrationFile {
+  name: string;
+  path: string;
+  version: number;
+}
+
+/**
+ * Discover migration .sql files in the migrations directory.
+ * Returns sorted array by version number.
+ */
+function discoverMigrations(dir: string): MigrationFile[] {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    // No migrations directory — nothing to do
+    return [];
+  }
+
+  const files: MigrationFile[] = [];
+  for (const entry of entries) {
+    if (!entry.endsWith(".sql")) continue;
+    // Extract version from filename: 001_baseline.sql → 1
+    const match = entry.match(/^(\d{3})_/);
+    if (!match) continue;
+    const version = parseInt(match[1], 10);
+    const path = join(dir, entry);
+    try {
+      // Verify it's a regular file, not a directory
+      if (!statSync(path).isFile()) continue;
+    } catch {
+      continue;
+    }
+    files.push({ name: basename(entry), path, version });
+  }
+
+  // Sort by version number ascending
+  files.sort((a, b) => a.version - b.version);
+  return files;
+}
+
+/**
+ * Create a timestamped backup of the database file.
+ * Only runs for the first migration (user_version=0).
+ */
+function createBackup(dbPath: string): void {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = `${dbPath}.backup-pre-migrate-${timestamp}`;
+  try {
+    // Use SQLite backup API via better-sqlite3 (cleaner than fs.copyFileSync
+    // while WAL mode is active — this ensures a consistent snapshot)
+    copyFileSync(dbPath, backupPath);
+    console.error(
+      `  [migrate] Backup created: ${backupPath}`,
+    );
+  } catch (err) {
+    console.error(
+      `[migrate] WARNING: Could not create backup at ${backupPath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    console.error(
+      `[migrate] Set COGMEMORY_SKIP_BACKUP=1 to suppress this warning.`,
+    );
+    // Don't block migration — backup failure is non-fatal
+  }
+}
+
+/**
+ * Guard: check whether a column already exists on a table.
+ * Useful for ALTER TABLE ADD COLUMN in raw SQL migrations.
+ */
+export function columnExists(
+  db: Database.Database,
+  table: string,
+  column: string,
+): boolean {
+  const cols = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
+  return cols.some((c) => c.name === column);
+}

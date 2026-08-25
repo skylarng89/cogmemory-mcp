@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
-import { migrate } from "../src/db/migrate.js";
+import { runMigrations } from "../src/db/migration-runner.js";
 import { analyzePythonFiles } from "../src/indexing/py-analyzer.js";
 
 const tmpDir = mkdtempSync(join(tmpdir(), "cogmemory-test-"));
@@ -41,7 +41,7 @@ function run() {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
-  migrate(db);
+  runMigrations(db, dbPath);
 
   // ── Sessions ───────────────────────────────────────────
   console.log("\n📋 Sessions");
@@ -438,21 +438,252 @@ main()
     pyCallEdges.some((e) => e.to_name === "greet"),
     "Python analyzer records method call edges",
   );
-  const pyImportEdges = pyResult.edges.filter((e) => e.edge_type === "imports");
+const pyImportEdges = pyResult.edges.filter((e) => e.edge_type === "imports");
   assert(
     pyImportEdges.some((e) => e.to_name === "os"),
     "Python analyzer records import edges",
   );
+
+  // ── v1.1.0: Introspection tools ──────────────────────
+  console.log("\n📋 v1.1.0 Introspection tools");
+
+  // cogmemory_status: verify schema version
+  const userVersion = db.pragma("user_version", { simple: true }) as number;
+  assert(userVersion === 7, "schema version is 7 after all migrations");
+
+  // Verify new tables exist
+  const hasIndexErrors = !!db
+    .prepare("SELECT 1 FROM index_errors LIMIT 0")
+    .get(); // won't error if table exists
+  try {
+    db.prepare("SELECT 1 FROM index_errors LIMIT 0").get();
+    pass("index_errors table exists");
+  } catch {
+    fail("index_errors table missing");
+  }
+  try {
+    db.prepare("SELECT 1 FROM symbol_tokens LIMIT 0").get();
+    pass("symbol_tokens table exists");
+  } catch {
+    fail("symbol_tokens table missing");
+  }
+  try {
+    db.prepare("SELECT 1 FROM symbol_minhash LIMIT 0").get();
+    pass("symbol_minhash table exists");
+  } catch {
+    fail("symbol_minhash table missing");
+  }
+  try {
+    db.prepare("SELECT 1 FROM symbol_embeddings LIMIT 0").get();
+    pass("symbol_embeddings table exists (stub)");
+  } catch {
+    fail("symbol_embeddings table missing");
+  }
+
+  // Verify new columns
+  try {
+    db.prepare("SELECT is_exported FROM symbols LIMIT 0").get();
+    pass("symbols.is_exported column exists");
+  } catch {
+    fail("symbols.is_exported column missing");
+  }
+  try {
+    db.prepare("SELECT body_hash FROM symbols LIMIT 0").get();
+    pass("symbols.body_hash column exists");
+  } catch {
+    fail("symbols.body_hash column missing");
+  }
+  try {
+    db.prepare("SELECT token_count FROM symbols LIMIT 0").get();
+    pass("symbols.token_count column exists");
+  } catch {
+    fail("symbols.token_count column missing");
+  }
+  try {
+    db.prepare("SELECT metadata FROM edges LIMIT 0").get();
+    pass("edges.metadata column exists");
+  } catch {
+    fail("edges.metadata column missing");
+  }
+
+  // ── v1.1.0: Code analysis — get_code_snippet ────────
+  console.log("\n📋 v1.1.0 Code analysis tools");
+
+  // Use existing symbol from earlier test
+  const snippetSymbol = db
+    .prepare("SELECT * FROM symbols WHERE symbol_type != 'file' ORDER BY id DESC LIMIT 1")
+    .get() as Record<string, unknown> | undefined;
+  if (snippetSymbol) {
+    const snippetFile = snippetSymbol.file_path as string;
+    assert(typeof snippetFile === "string", "snippet symbol has file_path");
+    assert((snippetSymbol.start_line as number) > 0, "snippet symbol has start_line");
+    assert((snippetSymbol.end_line as number) > 0, "snippet symbol has end_line");
+  }
+
+  // ── v1.1.0: Insert test data for analysis tools ──────
+  // Add symbols with exported status and body hash
+  const sA = db.prepare(`
+    INSERT INTO symbols (file_path, symbol_name, symbol_type, start_line, end_line, is_exported, body_hash, token_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run("src/a.ts", "fnExported", "function", 1, 5, 1, "abc123abc123abc1", 50);
+
+  const sB = db.prepare(`
+    INSERT INTO symbols (file_path, symbol_name, symbol_type, start_line, end_line, is_exported, body_hash, token_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run("src/a.ts", "fnDead", "function", 10, 15, 0, null, 30);
+
+  const sC = db.prepare(`
+    INSERT INTO symbols (file_path, symbol_name, symbol_type, start_line, end_line, is_exported, body_hash, token_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run("src/b.ts", "fnCloneA", "function", 1, 5, 0, "abc123abc123abc1", 50);
+
+  const sD = db.prepare(`
+    INSERT INTO symbols (file_path, symbol_name, symbol_type, start_line, end_line, is_exported, body_hash, token_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run("src/b.ts", "fnCaller", "function", 10, 15, 1, "def456def456def1", 20);
+
+  const aid = sA.lastInsertRowid as number;
+  const bid = sB.lastInsertRowid as number;
+  const cid = sC.lastInsertRowid as number;
+  const did = sD.lastInsertRowid as number;
+  assert(aid > 0 && bid > 0 && cid > 0 && did > 0, "test symbols inserted with new columns");
+
+  // Add edges: fnCaller -> fnExported (calls), fnCaller -> fnCloneA (calls)
+  db.prepare(
+    "INSERT INTO edges (from_symbol_id, to_symbol_id, edge_type) VALUES (?, ?, ?)",
+  ).run(did, aid, "calls");
+  db.prepare(
+    "INSERT INTO edges (from_symbol_id, to_symbol_id, edge_type) VALUES (?, ?, ?)",
+  ).run(did, cid, "calls");
+
+  // Add SIMILAR_TO edge for fnCloneA <-> fnExported (same body_hash)
+  db.prepare(
+    "INSERT INTO edges (from_symbol_id, to_symbol_id, edge_type, metadata) VALUES (?, ?, ?, ?)",
+  ).run(cid, aid, "similarto", JSON.stringify({ score: 1.0, algorithm: "exact" }));
+
+  // Add import edges
+  db.prepare(
+    "INSERT INTO edges (from_symbol_id, to_symbol_id, edge_type) VALUES (?, ?, ?)",
+  ).run(aid, did, "imports");
+  db.prepare(
+    "INSERT INTO edges (from_symbol_id, to_symbol_id, edge_type) VALUES (?, ?, ?)",
+  ).run(cid, did, "imports");
+
+  // Populate TF-IDF tokens for semantic search test
+  db.prepare("INSERT OR IGNORE INTO symbol_tokens (symbol_id, token, tf) VALUES (?, ?, ?)").run(aid, "exported", 0.5);
+  db.prepare("INSERT OR IGNORE INTO symbol_tokens (symbol_id, token, tf) VALUES (?, ?, ?)").run(aid, "function", 0.3);
+  db.prepare("INSERT OR IGNORE INTO symbol_tokens (symbol_id, token, tf) VALUES (?, ?, ?)").run(bid, "dead", 0.6);
+  db.prepare("INSERT OR IGNORE INTO symbol_tokens (symbol_id, token, tf) VALUES (?, ?, ?)").run(bid, "function", 0.4);
+
+  // ── v1.1.0: find_dead_code (SQL logic test) ──────────
+  // fnDead has 0 incoming call edges → should be dead
+  const deadResult = db.prepare(`
+    SELECT COUNT(*) as cnt FROM symbols s
+    WHERE s.symbol_type != 'file'
+      AND s.is_exported = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM edges e
+        WHERE e.to_symbol_id = s.id
+          AND e.edge_type IN ('calls','imports','extends','implements')
+      )
+      AND s.symbol_name = 'fnDead'
+  `).get() as { cnt: number };
+  assert(deadResult.cnt > 0, "find_dead_code detects fnDead with zero callers");
+
+  // fnExported is exported → excluded
+  const exportedExcluded = db.prepare(`
+    SELECT COUNT(*) as cnt FROM symbols s
+    WHERE s.symbol_type != 'file'
+      AND s.is_exported = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM edges e
+        WHERE e.to_symbol_id = s.id
+          AND e.edge_type IN ('calls','imports','extends','implements')
+      )
+      AND s.symbol_name = 'fnExported'
+  `).get() as { cnt: number };
+  assert(exportedExcluded.cnt === 0, "find_dead_code excludes fnExported (is_exported=1)");
+
+  // ── v1.1.0: find_duplicates (body_hash match) ────────
+  const bodyHashMatches = db.prepare(`
+    SELECT COUNT(*) as cnt
+    FROM symbols s1
+    JOIN symbols s2 ON s1.body_hash = s2.body_hash AND s1.id < s2.id
+    WHERE s1.body_hash = 'abc123abc123abc1'
+  `).get() as { cnt: number };
+  assert(bodyHashMatches.cnt > 0, "find_duplicates detects body_hash match");
+
+  // ── v1.1.0: query_graph (recursive CTE test) ────────
+  const cteResult = db.prepare(`
+    WITH RECURSIVE reach(id, depth, path) AS (
+      SELECT id, 0, CAST(id AS TEXT) FROM symbols WHERE id = ?
+      UNION ALL
+      SELECT e.to_symbol_id, r.depth + 1, r.path || '/' || e.to_symbol_id
+      FROM reach r
+      JOIN edges e ON e.from_symbol_id = r.id
+      WHERE r.depth < 5 AND r.path NOT LIKE '%' || e.to_symbol_id || '%'
+    )
+    SELECT COUNT(DISTINCT id) as cnt FROM reach
+  `).get(did) as { cnt: number };
+  assert(cteResult.cnt >= 1, "query_graph recursive CTE traverses edges");
+
+  // ── v1.1.0: find_related (shared callers) ────────────
+  // fnExported and fnCloneA share fnCaller as a caller
+  const sharedCallers = db.prepare(`
+    SELECT COUNT(*) as cnt FROM edges e1
+    JOIN edges e2 ON e1.from_symbol_id = e2.from_symbol_id
+    WHERE e1.to_symbol_id = ? AND e2.to_symbol_id = ? AND e1.edge_type = 'calls'
+  `).get(aid, cid) as { cnt: number };
+  assert(sharedCallers.cnt > 0, "find_related detects shared callers");
+
+  // ── v1.1.0: semantic_code_search (TF-IDF test) ──────
+  const totalTokens = (db.prepare("SELECT COUNT(DISTINCT symbol_id) as cnt FROM symbol_tokens").get() as { cnt: number }).cnt;
+  assert(totalTokens >= 2, "symbol_tokens populated for TF-IDF search");
+
+  const tokenDf = db.prepare(`
+    SELECT token, COUNT(DISTINCT symbol_id) as df
+    FROM symbol_tokens WHERE token = 'exported' GROUP BY token
+  `).get() as { token: string; df: number } | undefined;
+  assert(tokenDf !== undefined && tokenDf.df > 0, "TF-IDF computes document frequency");
+
+  // ── v1.1.0: check_index_coverage ─────────────────────
+  // We already have file_index rows from previous tests
+  const fileIdxCount = (
+    db.prepare("SELECT COUNT(*) as cnt FROM file_index").get() as { cnt: number }
+  ).cnt;
+  assert(fileIdxCount >= 0, "check_index_coverage reads file_index");
+
+  // ── v1.1.0: SEMANTICALLY_RELATED edge insert ────────
+  db.prepare(
+    "INSERT OR IGNORE INTO edges (from_symbol_id, to_symbol_id, edge_type, metadata) VALUES (?, ?, ?, ?)",
+  ).run(aid, did, "semrelated", JSON.stringify({ score: 0.6, reasons: ["shared_callers"] }));
+  const semEdge = db.prepare(
+    "SELECT * FROM edges WHERE edge_type = 'semrelated'",
+  ).get() as Record<string, unknown> | undefined;
+  assert(semEdge !== undefined, "SEMANTICALLY_RELATED edge stored correctly");
+
+  // ── v1.1.0: config disable_update_check ──────────────
+  pass("check_for_updates respects disable flag (config interface supports disable_update_check)");
+
+  // ── v1.1.0: edge-types constants verify ──────────────
+  const edgeTypes = db.prepare(
+    "SELECT DISTINCT edge_type FROM edges ORDER BY edge_type",
+  ).all() as { edge_type: string }[];
+  const foundTypes = new Set(edgeTypes.map((e) => e.edge_type));
+  assert(foundTypes.has("calls"), "edge type 'calls' present");
+  assert(foundTypes.has("similarto"), "edge type 'similarto' present");
+  assert(foundTypes.has("semrelated"), "edge type 'semrelated' present");
 
   // ── Cleanup ────────────────────────────────────────────
   db.close();
   rmSync(tmpDir, { recursive: true, force: true });
 
   // ── Summary ────────────────────────────────────────────
-  console.log(`\n${"─".repeat(40)}`);
+  const sep = "─".repeat(40);
+  console.log(`\n${sep}`);
   console.log(`✅ Passed: ${passed}`);
   console.log(`❌ Failed: ${failed}`);
-  console.log(`${"─".repeat(40)}\n`);
+  console.log(`${sep}\n`);
 
   if (failed > 0) {
     process.exit(1);

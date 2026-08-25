@@ -3,6 +3,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { VERSION } from "./version.js";
 import { resolveConfig, resolveWorkspaceRoot } from "./config.js";
 import { openDatabase, closeDatabase } from "./db/connection.js";
 import { registerSessionTools } from "./tools/sessions.js";
@@ -13,8 +14,8 @@ import { registerSpecsTools } from "./tools/specs.js";
 import { registerCodeGraphTools } from "./tools/code-graph.js";
 import { registerCodemapTools } from "./tools/codemap.js";
 import { registerListDeleteTools } from "./tools/list-delete.js";
-
-const VERSION = "0.1.0";
+import { registerIntrospectionTools } from "./tools/introspection.js";
+import { registerCodeAnalysisTools } from "./tools/code-analysis.js";
 
 async function main(): Promise<void> {
   // Resolve workspace root and config
@@ -49,6 +50,8 @@ async function main(): Promise<void> {
   registerCodeGraphTools(server, db, workspaceRoot);
   registerCodemapTools(server, db);
   registerListDeleteTools(server, db);
+  registerIntrospectionTools(server, db, workspaceRoot);
+  registerCodeAnalysisTools(server, db, workspaceRoot);
 
   // Log to stderr (stdio transport uses stdout for protocol)
   console.error(

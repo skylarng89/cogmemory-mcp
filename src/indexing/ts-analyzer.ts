@@ -10,6 +10,7 @@ export interface ExtractedSymbol {
   symbol_type: string;
   start_line: number | null;
   end_line: number | null;
+  is_exported?: boolean;
 }
 
 export interface ExtractedEdge {
@@ -85,6 +86,7 @@ function registerSymbol(
   endLine: number,
   symbols: ExtractedSymbol[],
   symbolIndex: Map<string, ExtractedSymbol>,
+  isExported: boolean = false,
 ): void {
   const sym: ExtractedSymbol = {
     file_path: filePath,
@@ -92,6 +94,7 @@ function registerSymbol(
     symbol_type: symbolType,
     start_line: startLine,
     end_line: endLine,
+    is_exported: isExported,
   };
   symbols.push(sym);
   symbolIndex.set(`${filePath}:${name}`, sym);
@@ -122,6 +125,7 @@ function extractFunctions(
     const name = fn.getName();
     if (!name) continue;
     const type = fn.isAsync() ? "async-function" : "function";
+    const isExported = fn.isExported() || fn.isDefaultExport() || fn.isNamedExport();
     registerSymbol(
       filePath,
       name,
@@ -130,6 +134,7 @@ function extractFunctions(
       fn.getEndLineNumber(),
       symbols,
       symbolIndex,
+      isExported,
     );
   }
 }
@@ -143,6 +148,7 @@ function extractClasses(
   for (const cls of sourceFile.getClasses()) {
     const name = cls.getName();
     if (!name) continue;
+    const isExported = cls.isExported();
     registerSymbol(
       filePath,
       name,
@@ -151,6 +157,7 @@ function extractClasses(
       cls.getEndLineNumber(),
       symbols,
       symbolIndex,
+      isExported,
     );
     for (const method of cls.getMethods()) {
       registerSymbol(
@@ -173,6 +180,7 @@ function extractSimpleDeclarations(
   symbolIndex: Map<string, ExtractedSymbol>,
 ): void {
   for (const iface of sourceFile.getInterfaces()) {
+    const isExported = iface.isExported();
     registerSymbol(
       filePath,
       iface.getName(),
@@ -181,9 +189,11 @@ function extractSimpleDeclarations(
       iface.getEndLineNumber(),
       symbols,
       symbolIndex,
+      isExported,
     );
   }
   for (const ta of sourceFile.getTypeAliases()) {
+    const isExported = ta.isExported();
     registerSymbol(
       filePath,
       ta.getName(),
@@ -192,9 +202,11 @@ function extractSimpleDeclarations(
       ta.getEndLineNumber(),
       symbols,
       symbolIndex,
+      isExported,
     );
   }
   for (const en of sourceFile.getEnums()) {
+    const isExported = en.isExported();
     registerSymbol(
       filePath,
       en.getName(),
@@ -203,6 +215,7 @@ function extractSimpleDeclarations(
       en.getEndLineNumber(),
       symbols,
       symbolIndex,
+      isExported,
     );
   }
 }
