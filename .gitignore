@@ -17,6 +17,7 @@ Thumbs.db
 .sugar/
 schema.sql
 !/src/db/schema.sql
+src/version.ts
 
 # IDE
 .idea/
