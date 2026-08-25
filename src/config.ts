@@ -14,6 +14,7 @@ export interface Config {
 
 interface ConfigFile {
   scope?: Scope;
+  disable_update_check?: boolean;
 }
 
 /**

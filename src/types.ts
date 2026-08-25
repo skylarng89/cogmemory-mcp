@@ -125,12 +125,24 @@ export interface Symbol {
   updated_at: string;
 }
 
+// Extended Symbol with v1.1.0 columns (mutable via ALTER TABLE migrations)
+export interface SymbolExtended extends Symbol {
+  is_exported: number;   // 0 or 1
+  body_hash: string | null;
+  token_count: number | null;
+}
+
 export interface Edge {
   id: number;
   from_symbol_id: number;
   to_symbol_id: number;
   edge_type: string;
   created_at: string;
+}
+
+// Extended Edge with v1.1.0 metadata column
+export interface EdgeExtended extends Edge {
+  metadata: string | null; // JSON: {score, algorithm, ...}
 }
 
 export interface ExecutionTrace {
@@ -146,6 +158,38 @@ export interface CodemapAnnotation {
   symbol_id: number | null;
   trace_id: number | null;
   annotation: string;
+  created_at: string;
+}
+
+// ─── CODE GRAPH: NEW TABLES (v1.1.0 migrations 003–007) ───
+
+export interface IndexError {
+  id: number;
+  file_path: string;
+  error_type: string;      // 'parse' | 'resolve' | 'io'
+  error_message: string;
+  occurred_at: string;
+}
+
+export interface SymbolToken {
+  symbol_id: number;
+  token: string;
+  tf: number;
+}
+
+export interface SymbolMinhash {
+  symbol_id: number;
+  signature: string;       // JSON array of integer hashes
+  num_hashes: number;
+  shingle_k: number;
+  computed_at: string;
+}
+
+export interface SymbolEmbedding {
+  symbol_id: number;
+  embedding: string | null; // BLOB (base64 if serialized)
+  model: string;
+  dim: number;
   created_at: string;
 }
 
