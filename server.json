@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/refs/heads/main/schema/2026-07-28/schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.skylarng89/cogmemory-mcp",
   "description": "CogMemory MCP Server — Unified context subsystems for AI coding agents",
   "repository": {
