@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // CogMemory MCP — Pre-build script
 // Syncs server.json version from package.json (single source of truth).
 // Runs as part of the prebuild hook alongside generate-version.ts.
@@ -15,7 +16,7 @@ const srv = JSON.parse(readFileSync(join(root, "server.json"), "utf-8"));
 const version = pkg.version;
 
 srv.version = version;
-if (srv.packages && srv.packages[0]) {
+if (srv.packages?.[0]) {
   srv.packages[0].version = version;
 }
 

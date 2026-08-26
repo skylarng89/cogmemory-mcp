@@ -11,11 +11,23 @@ import type {
 } from "./types.js";
 
 // Re-export shared types so existing consumers (py-analyzer.ts) are unaffected.
-export type { ExtractedSymbol, ExtractedEdge, AnalysisResult, LanguageAnalyzer } from "./types.js";
+export type {
+  ExtractedSymbol,
+  ExtractedEdge,
+  AnalysisResult,
+  LanguageAnalyzer,
+} from "./types.js";
 
 // ─── Analyzer implementation ────────────────────────────────
 
-const TS_EXTENSIONS: readonly string[] = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+const TS_EXTENSIONS: readonly string[] = [
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+];
 
 function analyzeTsFiles(files: string[], rootDir: string): AnalysisResult {
   const project = new Project({
@@ -77,19 +89,30 @@ export const analyzeFiles = analyzeTsFiles;
 
 // ─── Symbol / edge helpers ──────────────────────────────────
 
+interface SymbolRegistration {
+  filePath: string;
+  name: string;
+  symbolType: string;
+  startLine: number;
+  endLine: number;
+  symbols: ExtractedSymbol[];
+  symbolIndex: Map<string, ExtractedSymbol>;
+  isExported?: boolean;
+}
+
 /**
  * Register a symbol in the collection and index.
  */
-function registerSymbol(
-  filePath: string,
-  name: string,
-  symbolType: string,
-  startLine: number,
-  endLine: number,
-  symbols: ExtractedSymbol[],
-  symbolIndex: Map<string, ExtractedSymbol>,
-  isExported: boolean = false,
-): void {
+function registerSymbol({
+  filePath,
+  name,
+  symbolType,
+  startLine,
+  endLine,
+  symbols,
+  symbolIndex,
+  isExported = false,
+}: SymbolRegistration): void {
   const sym: ExtractedSymbol = {
     file_path: filePath,
     symbol_name: name,
@@ -127,17 +150,18 @@ function extractFunctions(
     const name = fn.getName();
     if (!name) continue;
     const type = fn.isAsync() ? "async-function" : "function";
-    const isExported = fn.isExported() || fn.isDefaultExport() || fn.isNamedExport();
-    registerSymbol(
+    const isExported =
+      fn.isExported() || fn.isDefaultExport() || fn.isNamedExport();
+    registerSymbol({
       filePath,
       name,
-      type,
-      fn.getStartLineNumber(),
-      fn.getEndLineNumber(),
+      symbolType: type,
+      startLine: fn.getStartLineNumber(),
+      endLine: fn.getEndLineNumber(),
       symbols,
       symbolIndex,
       isExported,
-    );
+    });
   }
 }
 
@@ -151,26 +175,26 @@ function extractClasses(
     const name = cls.getName();
     if (!name) continue;
     const isExported = cls.isExported();
-    registerSymbol(
+    registerSymbol({
       filePath,
       name,
-      "class",
-      cls.getStartLineNumber(),
-      cls.getEndLineNumber(),
+      symbolType: "class",
+      startLine: cls.getStartLineNumber(),
+      endLine: cls.getEndLineNumber(),
       symbols,
       symbolIndex,
       isExported,
-    );
+    });
     for (const method of cls.getMethods()) {
-      registerSymbol(
+      registerSymbol({
         filePath,
-        `${name}.${method.getName()}`,
-        "method",
-        method.getStartLineNumber(),
-        method.getEndLineNumber(),
+        name: `${name}.${method.getName()}`,
+        symbolType: "method",
+        startLine: method.getStartLineNumber(),
+        endLine: method.getEndLineNumber(),
         symbols,
         symbolIndex,
-      );
+      });
     }
   }
 }
@@ -183,42 +207,42 @@ function extractSimpleDeclarations(
 ): void {
   for (const iface of sourceFile.getInterfaces()) {
     const isExported = iface.isExported();
-    registerSymbol(
+    registerSymbol({
       filePath,
-      iface.getName(),
-      "interface",
-      iface.getStartLineNumber(),
-      iface.getEndLineNumber(),
+      name: iface.getName(),
+      symbolType: "interface",
+      startLine: iface.getStartLineNumber(),
+      endLine: iface.getEndLineNumber(),
       symbols,
       symbolIndex,
       isExported,
-    );
+    });
   }
   for (const ta of sourceFile.getTypeAliases()) {
     const isExported = ta.isExported();
-    registerSymbol(
+    registerSymbol({
       filePath,
-      ta.getName(),
-      "type-alias",
-      ta.getStartLineNumber(),
-      ta.getEndLineNumber(),
+      name: ta.getName(),
+      symbolType: "type-alias",
+      startLine: ta.getStartLineNumber(),
+      endLine: ta.getEndLineNumber(),
       symbols,
       symbolIndex,
       isExported,
-    );
+    });
   }
   for (const en of sourceFile.getEnums()) {
     const isExported = en.isExported();
-    registerSymbol(
+    registerSymbol({
       filePath,
-      en.getName(),
-      "enum",
-      en.getStartLineNumber(),
-      en.getEndLineNumber(),
+      name: en.getName(),
+      symbolType: "enum",
+      startLine: en.getStartLineNumber(),
+      endLine: en.getEndLineNumber(),
       symbols,
       symbolIndex,
       isExported,
-    );
+    });
   }
 }
 
@@ -233,15 +257,15 @@ function extractVariables(
     if (!name) continue;
     const parentKind = varDecl.getParent()?.getParent()?.getKind();
     if (parentKind === SyntaxKind.VariableStatement) {
-      registerSymbol(
+      registerSymbol({
         filePath,
         name,
-        "variable",
-        varDecl.getStartLineNumber(),
-        varDecl.getEndLineNumber(),
+        symbolType: "variable",
+        startLine: varDecl.getStartLineNumber(),
+        endLine: varDecl.getEndLineNumber(),
         symbols,
         symbolIndex,
-      );
+      });
     }
   }
 }
