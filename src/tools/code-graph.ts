@@ -9,7 +9,8 @@ import { resolve } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { wrapHandler, jsonOk } from "./utils.js";
-import { EDGE_TYPES, STRUCTURAL_EDGE_TYPES } from "../indexing/edge-types.js";
+// EDGE_TYPES and STRUCTURAL_EDGE_TYPES are imported but not used in this file
+// They were previously used for validation but are no longer needed
 
 /** Default extensions derived from the analyzer registry. */
 function getDefaultExtensions(): string[] {
