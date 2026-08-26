@@ -8,20 +8,8 @@ import type {
   AnalysisResult,
   ExtractedSymbol,
   ExtractedEdge,
-} from "./ts-analyzer.js";
-
-// Reuse the shared AnalysisResult / ExtractedSymbol / ExtractedEdge shapes so
-// the code-graph indexer can treat JS/TS and Python results identically.
-
-let parser: Parser | null = null;
-
-function getParser(): Parser {
-  if (!parser) {
-    parser = new Parser();
-    parser.setLanguage(Python);
-  }
-  return parser;
-}
+  LanguageAnalyzer,
+} from "./types.js";
 
 // ─── Node types from tree-sitter-python ───────────────────
 // Reference: https://github.com/tree-sitter/tree-sitter-python
@@ -37,18 +25,21 @@ interface WalkCtx {
   allNames: Set<string> | null;
 }
 
-/**
- * Analyze a set of Python files using tree-sitter and extract symbols + edges.
- * Symbols: files, functions, classes, methods
- * Edges: function calls, imports, class inheritance (bases)
- *
- * Mirrors the contract of analyzeFiles() in ts-analyzer.ts so the caller can
- * treat both analyzers interchangeably.
- */
-export function analyzePythonFiles(
-  files: string[],
-  rootDir: string,
-): AnalysisResult {
+let parser: Parser | null = null;
+
+function getParser(): Parser {
+  if (!parser) {
+    parser = new Parser();
+    parser.setLanguage(Python);
+  }
+  return parser;
+}
+
+// ─── Analyzer implementation ────────────────────────────────
+
+const PY_EXTENSIONS: readonly string[] = [".py"];
+
+function analyzePyFiles(files: string[], rootDir: string): AnalysisResult {
   const parserInstance = getParser();
   const symbols: ExtractedSymbol[] = [];
   const edges: ExtractedEdge[] = [];
@@ -82,6 +73,21 @@ export function analyzePythonFiles(
 
   return { symbols, edges };
 }
+
+/**
+ * Python language analyzer conforming to the LanguageAnalyzer interface.
+ * Handles `.py` files via tree-sitter.
+ */
+export const pythonAnalyzer: LanguageAnalyzer = {
+  extensions: PY_EXTENSIONS,
+  analyze: analyzePyFiles,
+};
+
+/**
+ * Standalone entry point — preserved for backward compatibility.
+ * Prefer using the `pythonAnalyzer` object and the analyzer registry for new code.
+ */
+export const analyzePythonFiles = analyzePyFiles;
 
 // ─── Symbol / edge helpers ────────────────────────────────
 

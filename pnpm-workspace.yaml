@@ -2,4 +2,5 @@ allowBuilds:
   better-sqlite3: true
   esbuild: true
   tree-sitter: true
+  tree-sitter-go: true
   tree-sitter-python: true

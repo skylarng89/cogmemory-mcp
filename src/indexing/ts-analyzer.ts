@@ -3,37 +3,21 @@
 import { Project, SyntaxKind, Node, type SourceFile } from "ts-morph";
 import { relative, dirname, join as pathJoin } from "node:path";
 import { existsSync } from "node:fs";
+import type {
+  ExtractedSymbol,
+  ExtractedEdge,
+  AnalysisResult,
+  LanguageAnalyzer,
+} from "./types.js";
 
-export interface ExtractedSymbol {
-  file_path: string;
-  symbol_name: string;
-  symbol_type: string;
-  start_line: number | null;
-  end_line: number | null;
-  is_exported?: boolean;
-}
+// Re-export shared types so existing consumers (py-analyzer.ts) are unaffected.
+export type { ExtractedSymbol, ExtractedEdge, AnalysisResult, LanguageAnalyzer } from "./types.js";
 
-export interface ExtractedEdge {
-  from_file: string;
-  from_name: string;
-  from_start_line: number | null;
-  to_file: string;
-  to_name: string;
-  to_start_line: number | null;
-  edge_type: string;
-}
+// ─── Analyzer implementation ────────────────────────────────
 
-export interface AnalysisResult {
-  symbols: ExtractedSymbol[];
-  edges: ExtractedEdge[];
-}
+const TS_EXTENSIONS: readonly string[] = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 
-/**
- * Analyze a set of JS/TS files using ts-morph and extract symbols + edges.
- * Symbols: files, functions, classes, interfaces, methods, type aliases, enums
- * Edges: function calls, imports, class extends/implements
- */
-export function analyzeFiles(files: string[], rootDir: string): AnalysisResult {
+function analyzeTsFiles(files: string[], rootDir: string): AnalysisResult {
   const project = new Project({
     skipAddingFilesFromTsConfig: true,
     compilerOptions: {
@@ -74,6 +58,24 @@ export function analyzeFiles(files: string[], rootDir: string): AnalysisResult {
 
   return { symbols, edges };
 }
+
+/**
+ * TypeScript / JavaScript language analyzer conforming to the LanguageAnalyzer
+ * interface.  Handles `.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs` files via
+ * ts-morph.
+ */
+export const tsAnalyzer: LanguageAnalyzer = {
+  extensions: TS_EXTENSIONS,
+  analyze: analyzeTsFiles,
+};
+
+/**
+ * Standalone entry point — preserved for backward compatibility.
+ * Prefer using the `tsAnalyzer` object and the analyzer registry for new code.
+ */
+export const analyzeFiles = analyzeTsFiles;
+
+// ─── Symbol / edge helpers ──────────────────────────────────
 
 /**
  * Register a symbol in the collection and index.

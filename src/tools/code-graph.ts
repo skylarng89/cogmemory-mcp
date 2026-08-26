@@ -4,52 +4,17 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
 import { walkFilesWithMtime } from "../indexing/walker.js";
-import { analyzeFiles } from "../indexing/ts-analyzer.js";
-import { analyzePythonFiles } from "../indexing/py-analyzer.js";
-import { resolve, extname } from "node:path";
+import { analyzeMixed, getSupportedExtensions } from "../indexing/analyzer-registry.js";
+import { resolve } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { wrapHandler, jsonOk } from "./utils.js";
 import { EDGE_TYPES, STRUCTURAL_EDGE_TYPES } from "../indexing/edge-types.js";
 
-/** Extensions handled by the ts-morph (JS/TS) analyzer. */
-const TS_EXTENSIONS = new Set(["ts", "tsx", "js", "jsx", "mjs", "cjs"]);
-/** Extensions handled by the tree-sitter (Python) analyzer. */
-const PY_EXTENSIONS = new Set(["py"]);
-
-/** Default extensions across all supported languages. */
-const DEFAULT_EXTENSIONS = [...TS_EXTENSIONS, ...PY_EXTENSIONS];
-
-/**
- * Dispatch a batch of files to the appropriate language analyzer based on
- * extension. Returns the merged symbols + edges from all analyzers.
- */
-function analyzeMixed(files: string[], rootDir: string) {
-  const tsFiles: string[] = [];
-  const pyFiles: string[] = [];
-  for (const f of files) {
-    const ext = extname(f).slice(1).toLowerCase();
-    if (PY_EXTENSIONS.has(ext)) {
-      pyFiles.push(f);
-    } else if (TS_EXTENSIONS.has(ext)) {
-      tsFiles.push(f);
-    }
-    // Unknown extensions are skipped — walker already filtered by extension
-  }
-
-  const tsResult =
-    tsFiles.length > 0
-      ? analyzeFiles(tsFiles, rootDir)
-      : { symbols: [], edges: [] };
-  const pyResult =
-    pyFiles.length > 0
-      ? analyzePythonFiles(pyFiles, rootDir)
-      : { symbols: [], edges: [] };
-
-  return {
-    symbols: [...tsResult.symbols, ...pyResult.symbols],
-    edges: [...tsResult.edges, ...pyResult.edges],
-  };
+/** Default extensions derived from the analyzer registry. */
+function getDefaultExtensions(): string[] {
+  // Strip leading dots for the walker (which expects bare extensions).
+  return getSupportedExtensions().map((e) => e.replace(/^\./, ""));
 }
 
 // ─── Tokenizer (same as code-analysis.ts) ───────────────
@@ -349,6 +314,104 @@ function analyzeAndInsert(
   return { newSymbolCount: result.symbols.length, newEdgeCount };
 }
 
+/**
+ * Cross-file edge resolution post-pass.
+ *
+ * After structural edges are inserted, resolve import edges to the actual
+ * exported symbol in the target file, creating "resolves" edges.
+ * This closes the gap where import edges only point to file-level symbols
+ * rather than the specific imported definition.
+ */
+function resolveCrossFileEdges(
+  targetDir: string,
+  db: Database.Database,
+): number {
+  // Build a global map: (file_path, symbol_name) → symbol_id for exported symbols
+  const exportedSymbols = db
+    .prepare(
+      `SELECT id, file_path, symbol_name FROM symbols WHERE is_exported = 1 AND symbol_type != 'file'`,
+    )
+    .all() as { id: number; file_path: string; symbol_name: string }[];
+  const exportMap = new Map<string, number>();
+  for (const sym of exportedSymbols) {
+    exportMap.set(`${sym.file_path}:${sym.symbol_name}`, sym.id);
+  }
+
+  // Also build a non-exported fallback map (for names that match unexported symbols)
+  const allSymbols = db
+    .prepare(`SELECT id, file_path, symbol_name FROM symbols WHERE symbol_type != 'file'`)
+    .all() as { id: number; file_path: string; symbol_name: string }[];
+  const nameMap = new Map<string, { id: number; file_path: string }[]>();
+  for (const sym of allSymbols) {
+    const list = nameMap.get(sym.symbol_name) ?? [];
+    list.push({ id: sym.id, file_path: sym.file_path });
+    nameMap.set(sym.symbol_name, list);
+  }
+
+  // Get all import edges
+  const importEdges = db
+    .prepare(
+      `SELECT e.id AS edge_id, e.from_symbol_id, e.to_symbol_id,
+              fs.file_path AS from_file, ts.file_path AS to_file,
+              ts.symbol_name AS to_name
+       FROM edges e
+       JOIN symbols fs ON e.from_symbol_id = fs.id
+       JOIN symbols ts ON e.to_symbol_id = ts.id
+       WHERE e.edge_type = 'imports'`,
+    )
+    .all() as {
+    edge_id: number;
+    from_symbol_id: number;
+    to_symbol_id: number;
+    from_file: string;
+    to_file: string;
+    to_name: string;
+  }[];
+
+  // For each import edge, try to find the concrete exported symbol in
+  // the target file and create a "resolves" edge.
+  const insertEdge = db.prepare(`
+    INSERT OR IGNORE INTO edges (from_symbol_id, to_symbol_id, edge_type)
+    VALUES (?, ?, ?)
+  `);
+
+  let resolved = 0;
+  db.transaction(() => {
+    for (const edge of importEdges) {
+      // Skip self-imports and wildcard imports
+      if (edge.to_name === "*") continue;
+      // The "to_file" is actually stored as a symbol_name for the file-level symbol;
+      // look up the real file path from the symbol ID.
+      const toFileSym = db
+        .prepare("SELECT file_path FROM symbols WHERE id = ?")
+        .get(edge.to_symbol_id) as { file_path: string } | undefined;
+      if (!toFileSym) continue;
+      const targetFile = toFileSym.file_path;
+
+      // Try export first, then any symbol in the target file
+      const matchKey = `${targetFile}:${edge.to_name}`;
+      const exportedId = exportMap.get(matchKey);
+      if (exportedId) {
+        insertEdge.run(edge.from_symbol_id, exportedId, "resolves");
+        resolved++;
+        continue;
+      }
+
+      // Fallback: match by name in the target file (may be an unexported symbol)
+      const candidates = nameMap.get(edge.to_name);
+      if (candidates) {
+        const exact = candidates.find((c) => c.file_path === targetFile);
+        if (exact) {
+          insertEdge.run(edge.from_symbol_id, exact.id, "resolves");
+          resolved++;
+        }
+      }
+    }
+  })();
+
+  return resolved;
+}
+
 function updateFileIndex(
   db: Database.Database,
   filesToAnalyze: string[],
@@ -409,6 +472,7 @@ interface IndexResultOpts {
   deleted: number;
   newSymbolCount: number;
   newEdgeCount: number;
+  resolvedEdgeCount: number;
 }
 
 function buildIndexResultResponse(
@@ -425,7 +489,7 @@ function buildIndexResultResponse(
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify({
+          text: JSON.stringify({
           success: true,
           message: opts.isFull
             ? `Full index of ${opts.targetDir}`
@@ -436,6 +500,7 @@ function buildIndexResultResponse(
           deleted: opts.deleted,
           newSymbols: opts.newSymbolCount,
           newEdges: opts.newEdgeCount,
+          resolvedEdges: opts.resolvedEdgeCount,
           totalSymbols,
           totalEdges,
         }),
@@ -455,7 +520,7 @@ export const IndexCodebaseSchema = z.object({
     .array(z.string())
     .optional()
     .describe(
-      "File extensions to index (default: ['ts','tsx','js','jsx','mjs','cjs','py']). JS/TS files use ts-morph; Python files use tree-sitter.",
+      "File extensions to index (default: all extensions registered in the analyzer registry — currently ts, tsx, js, jsx, mjs, cjs, py, go).",
     ),
   full: z
     .boolean()
@@ -498,12 +563,12 @@ export function registerCodeGraphTools(
     "index_codebase",
     {
       description:
-        "Walk the workspace and extract symbols + edges. JS/TS files are analyzed with ts-morph; Python (.py) files are analyzed with tree-sitter. Incremental by default (only re-analyzes changed files); use full=true to force complete re-index.",
+        "Walk the workspace and extract symbols + edges. Dispatches files to the correct language analyzer automatically via the analyzer registry. Incremental by default (only re-analyzes changed files); use full=true to force complete re-index.",
       inputSchema: IndexCodebaseSchema,
     },
     async ({ root_dir, extensions, full }) => {
       const targetDir = resolve(root_dir ?? workspaceRoot);
-      const exts = extensions ?? DEFAULT_EXTENSIONS;
+      const exts = extensions ?? getDefaultExtensions();
 
       try {
         const filesWithMtime = walkFilesWithMtime(targetDir, {
@@ -553,6 +618,8 @@ export function registerCodeGraphTools(
           db,
           symbolIdMap,
         );
+        // Cross-file resolution: link imports to their target exported symbols
+        const resolvedEdgeCount = resolveCrossFileEdges(targetDir, db);
         updateFileIndex(db, filesToAnalyze, currentFiles);
 
         return buildIndexResultResponse(
@@ -564,6 +631,7 @@ export function registerCodeGraphTools(
             deleted: deletedFiles.length,
             newSymbolCount,
             newEdgeCount,
+            resolvedEdgeCount: resolvedEdgeCount,
           },
           db,
         );
