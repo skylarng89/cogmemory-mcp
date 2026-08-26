@@ -202,8 +202,7 @@ export function registerSpecsTools(
 
       const newContent = content ?? current.content;
       const newTitle = title ?? current.title;
-      const newEntityId =
-        entity_id !== undefined ? entity_id : current.entity_id;
+      const newEntityId = entity_id ?? current.entity_id;
 
       const stmt = db.prepare(`
         UPDATE specs

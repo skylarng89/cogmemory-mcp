@@ -1,6 +1,6 @@
 {
     "compilerOptions": {
-        "target": "ES2022",
+        "target": "ES2025",
         "module": "Node16",
         "moduleResolution": "Node16",
         "outDir": "dist",
@@ -21,5 +21,9 @@
         "node_modules",
         "dist",
         "scripts"
+    ],
+    "types": [
+        "node",
+        "jest"
     ]
 }

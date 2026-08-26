@@ -3,6 +3,24 @@
 import { readdirSync, statSync, existsSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import ignore from "ignore";
+import type { Stats } from "node:fs";
+
+function getStatAndCheckIgnore(
+  fullPath: string,
+  relPath: string,
+  ig: ReturnType<typeof ignore>,
+  statSyncFn: typeof statSync
+): Stats | null {
+  try {
+    const stat = statSyncFn(fullPath);
+    if (ig.ignores(relPath + (stat.isDirectory() ? "/" : ""))) {
+      return null;
+    }
+    return stat;
+  } catch {
+    return null;
+  }
+}
 
 const DEFAULT_IGNORE_PATTERNS = [
   "node_modules",
@@ -69,17 +87,9 @@ export function walkFiles(rootDir: string, options: WalkOptions): string[] {
       const fullPath = join(dir, entry);
       const relPath = relative(rootDir, fullPath);
 
-      // Check ignore
-      if (ig.ignores(relPath + (statSync(fullPath).isDirectory() ? "/" : ""))) {
-        continue;
-      }
-
-      let stat;
-      try {
-        stat = statSync(fullPath);
-      } catch {
-        continue;
-      }
+      // Check ignore and get stats in one block
+      const stat = getStatAndCheckIgnore(fullPath, relPath, ig, statSync);
+      if (!stat) continue;
 
       if (stat.isDirectory()) {
         walk(fullPath, depth + 1);
@@ -134,13 +144,11 @@ export function walkFilesWithMtime(
     for (const entry of entries) {
       const fullPath = join(dir, entry);
       const relPath = relative(rootDir, fullPath);
-      let stat;
-      try {
-        stat = statSync(fullPath);
-      } catch {
-        continue;
-      }
-      if (ig.ignores(relPath + (stat.isDirectory() ? "/" : ""))) continue;
+
+      // Check ignore and get stats in one block
+      const stat = getStatAndCheckIgnore(fullPath, relPath, ig, statSync);
+      if (!stat) continue;
+
       if (stat.isDirectory()) {
         walk(fullPath, depth + 1);
       } else if (stat.isFile()) {

@@ -452,9 +452,6 @@ const pyImportEdges = pyResult.edges.filter((e) => e.edge_type === "imports");
   assert(userVersion === 7, "schema version is 7 after all migrations");
 
   // Verify new tables exist
-  const hasIndexErrors = !!db
-    .prepare("SELECT 1 FROM index_errors LIMIT 0")
-    .get(); // won't error if table exists
   try {
     db.prepare("SELECT 1 FROM index_errors LIMIT 0").get();
     pass("index_errors table exists");
