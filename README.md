@@ -18,7 +18,7 @@ Storage: **SQLite** via `better-sqlite3`. One `.db` file per scope.
 **Option A — npx (recommended, always latest):**
 
 ```bash
-npx cogmemory-mcp
+npx -y cogmemory-mcp@latest
 ```
 
 **Option B — Global install:**
@@ -31,7 +31,7 @@ cogmemory-mcp
 **Option C — pnpm dlx:**
 
 ```bash
-pnpm dlx cogmemory-mcp
+pnpm dlx cogmemory-mcp@latest
 ```
 
 **Option D — From source (developers):**
@@ -52,6 +52,7 @@ CogMemory depends on `better-sqlite3` and `tree-sitter`, which compile native mo
 - **`make`** (Linux/macOS, installed by default)
 
 Most platforms have **prebuilt binaries** available, so compilation is usually skipped on:
+
 - Linux x64 / arm64
 - macOS x64 / arm64
 - Windows x64
@@ -71,7 +72,7 @@ Add to `.vscode/mcp.json` (workspace-scoped):
   "servers": {
     "cogmemory": {
       "command": "npx",
-      "args": ["-y", "cogmemory-mcp"]
+      "args": ["-y", "cogmemory-mcp@latest"]
     }
   }
 }
@@ -84,11 +85,11 @@ Or use `--workspace` for multi-root support:
   "servers": {
     "cogmemory-frontend": {
       "command": "npx",
-      "args": ["-y", "cogmemory-mcp", "--workspace", "/path/to/frontend"]
+      "args": ["-y", "cogmemory-mcp@latest", "--workspace", "/path/to/frontend"]
     },
     "cogmemory-backend": {
       "command": "npx",
-      "args": ["-y", "cogmemory-mcp", "--workspace", "/path/to/backend"]
+      "args": ["-y", "cogmemory-mcp@latest", "--workspace", "/path/to/backend"]
     }
   }
 }
@@ -103,7 +104,7 @@ Add to `.cursor/mcp.json`:
   "mcpServers": {
     "cogmemory": {
       "command": "npx",
-      "args": ["-y", "cogmemory-mcp"]
+      "args": ["-y", "cogmemory-mcp@latest"]
     }
   }
 }
@@ -118,7 +119,7 @@ Add to `~/.config/claude/claude_desktop_config.json` (Linux/macOS) or `%APPDATA%
   "mcpServers": {
     "cogmemory": {
       "command": "npx",
-      "args": ["-y", "cogmemory-mcp"]
+      "args": ["-y", "cogmemory-mcp@latest"]
     }
   }
 }
@@ -133,7 +134,7 @@ Add to `~/.claude/mcp.json` (user-level) or `.claude/mcp.json` (project-level):
   "mcpServers": {
     "cogmemory": {
       "command": "npx",
-      "args": ["-y", "cogmemory-mcp"]
+      "args": ["-y", "cogmemory-mcp@latest"]
     }
   }
 }
@@ -144,7 +145,7 @@ Add to `~/.claude/mcp.json` (user-level) or `.claude/mcp.json` (project-level):
 In the Cline extension settings, add an MCP server:
 
 - **Name:** `cogmemory`
-- **Command:** `npx -y cogmemory-mcp`
+- **Command:** `npx -y cogmemory-mcp@latest`
 
 Or in `cline_mcp_settings.json`:
 
@@ -153,7 +154,7 @@ Or in `cline_mcp_settings.json`:
   "mcpServers": {
     "cogmemory": {
       "command": "npx",
-      "args": ["-y", "cogmemory-mcp"]
+      "args": ["-y", "cogmemory-mcp@latest"]
     }
   }
 }
@@ -168,7 +169,7 @@ MCP settings → Add server:
   "mcpServers": {
     "cogmemory": {
       "command": "npx",
-      "args": ["-y", "cogmemory-mcp"]
+      "args": ["-y", "cogmemory-mcp@latest"]
     }
   }
 }
@@ -183,7 +184,7 @@ Add to `opencode.json`:
   "mcp": {
     "cogmemory": {
       "command": "npx",
-      "args": ["-y", "cogmemory-mcp"]
+      "args": ["-y", "cogmemory-mcp@latest"]
     }
   }
 }
@@ -198,7 +199,7 @@ Add to Zed settings (`settings.json`):
   "context_servers": {
     "cogmemory": {
       "binary": "npx",
-      "args": ["-y", "cogmemory-mcp"]
+      "args": ["-y", "cogmemory-mcp@latest"]
     }
   }
 }
@@ -316,23 +317,23 @@ To disable this check:
 
 ### Introspection Tools (2)
 
-| Tool                | Description                                                                        |
-| ------------------- | ---------------------------------------------------------------------------------- |
+| Tool                | Description                                                                                                                |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `cogmemory_status`  | Show runtime config: package version, schema version, db path, workspace root, scope, index coverage, and subsystem counts |
-| `check_for_updates` | Check if a newer version is available on npm (HTTPS GET to registry, cached 24h)   |
+| `check_for_updates` | Check if a newer version is available on npm (HTTPS GET to registry, cached 24h)                                           |
 
 ### Code Analysis Tools (8)
 
-| Tool                   | Description                                                                                      |
-| ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `semantic_code_search` | TF-IDF based semantic code search — natural language query returns ranked symbols by relevance   |
-| `find_dead_code`       | Find symbols with zero inbound callers, excluding exported symbols and configurable entry points |
-| `find_duplicates`      | Detect duplicate/clone symbol pairs via exact hash + MinHash similarity, inserts `SIMILAR_TO` edges |
-| `find_related`         | Discover semantically-related symbols via shared callers/imports/same-file heuristics, inserts `SEMANTICALLY_RELATED` edges |
-| `query_graph`          | Multi-hop structural graph query using recursive CTE — supports arbitrary depth, edge-type filters, direction |
+| Tool                   | Description                                                                                                                       |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `semantic_code_search` | TF-IDF based semantic code search — natural language query returns ranked symbols by relevance                                    |
+| `find_dead_code`       | Find symbols with zero inbound callers, excluding exported symbols and configurable entry points                                  |
+| `find_duplicates`      | Detect duplicate/clone symbol pairs via exact hash + MinHash similarity, inserts `SIMILAR_TO` edges                               |
+| `find_related`         | Discover semantically-related symbols via shared callers/imports/same-file heuristics, inserts `SEMANTICALLY_RELATED` edges       |
+| `query_graph`          | Multi-hop structural graph query using recursive CTE — supports arbitrary depth, edge-type filters, direction                     |
 | `analyze_impact`       | Analyze impact of uncommitted changes (`git diff`) — maps changed files to symbols and computes reverse transitive caller closure |
-| `get_code_snippet`     | Fetch source code lines for a symbol by ID or name, with optional context padding                |
-| `check_index_coverage` | Report indexed vs. unindexed vs. stale files with per-language breakdowns                       |
+| `get_code_snippet`     | Fetch source code lines for a symbol by ID or name, with optional context padding                                                 |
+| `check_index_coverage` | Report indexed vs. unindexed vs. stale files with per-language breakdowns                                                         |
 
 ### List & Delete Tools (5)
 
@@ -415,11 +416,11 @@ Schema migrations are automatic via `PRAGMA user_version` (currently at version 
 
 The Code Graph (`index_codebase`) extracts symbols and edges from source files using language-specific analyzers:
 
-| Language   | Extensions                    | Analyzer    | Symbols Extracted                                                                    |
-| ---------- | ----------------------------- | ----------- | ------------------------------------------------------------------------------------ |
+| Language   | Extensions                    | Analyzer    | Symbols Extracted                                                                                   |
+| ---------- | ----------------------------- | ----------- | --------------------------------------------------------------------------------------------------- |
 | TypeScript | `.ts`, `.tsx`                 | ts-morph    | files, functions, classes, interfaces, methods, type aliases, enums, variables (with `is_exported`) |
-| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | ts-morph    | files, functions, classes, methods, variables                                        |
-| Python     | `.py`                         | tree-sitter | files, functions, classes, methods (with `is_exported` via `__all__` / underscore rule) |
+| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | ts-morph    | files, functions, classes, methods, variables                                                       |
+| Python     | `.py`                         | tree-sitter | files, functions, classes, methods (with `is_exported` via `__all__` / underscore rule)             |
 
 **Structural edges:** calls, imports, extends, implements
 
