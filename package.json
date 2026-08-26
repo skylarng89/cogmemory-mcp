@@ -39,6 +39,7 @@
     "dev": "tsx src/index.ts",
     "inspect": "npx @modelcontextprotocol/inspector npx tsx src/index.ts",
     "smoke-test": "tsx scripts/smoke-test.ts",
+    "version": "tsx scripts/generate-version.ts && tsx scripts/sync-server-json.ts",
     "prepublishOnly": "pnpm run build",
     "postbuild": "tsx scripts/copy-migrations.ts"
   },

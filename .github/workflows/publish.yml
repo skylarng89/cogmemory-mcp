@@ -2,7 +2,8 @@ name: Publish
 
 on:
   push:
-    branches: [main]
+    tags:
+      - 'v*'
 
 concurrency:
   group: publish
@@ -41,70 +42,40 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
 
-      - name: Check if tag already exists
-        id: tag_check
-        run: |
-          TAG="v${{ steps.version.outputs.version }}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists — skipping publish"
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build
-        if: steps.tag_check.outputs.exists != 'true'
         run: pnpm run build
 
       - name: Smoke test
-        if: steps.tag_check.outputs.exists != 'true'
         run: pnpm run smoke-test
 
-      - name: Create tag
-        if: steps.tag_check.outputs.exists != 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
-
       - name: Publish to npm (Trusted Publisher)
-        if: steps.tag_check.outputs.exists != 'true'
         run: npm publish --provenance --access public
 
       - name: Install mcp-publisher
-        if: steps.tag_check.outputs.exists != 'true'
         run: |
           curl --proto "=https" --tlsv1.2 -sSf -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
 
       - name: Authenticate to MCP Registry (OIDC)
-        if: steps.tag_check.outputs.exists != 'true'
         run: ./mcp-publisher login github-oidc
 
       - name: Publish to MCP Registry
-        if: steps.tag_check.outputs.exists != 'true'
         run: ./mcp-publisher publish
 
       - name: Summary
         if: always()
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          TAG_EXISTS="${{ steps.tag_check.outputs.exists }}"
 
           {
             echo "## 📦 Publish Summary"
             echo ""
-            if [ "$TAG_EXISTS" = "true" ]; then
-              echo "**Result:** Skipped — tag \`v${VERSION}\` already exists."
-            else
-              echo "**Result:** Published \`v${VERSION}\`"
-              echo ""
-              echo "| Target | Status |"
-              echo "|--------|--------|"
-              echo "| npm | ✅ Published |"
-              echo "| MCP Registry | ✅ Published |"
-              echo "| Git tag | ✅ \`v${VERSION}\` pushed |"
-            fi
+            echo "**Result:** Published \`v${VERSION}\`"
+            echo ""
+            echo "| Target | Status |"
+            echo "|--------|--------|"
+            echo "| npm | ✅ Published |"
+            echo "| MCP Registry | ✅ Published |"
+            echo "| Git tag | ✅ \`v${VERSION}\` |"
             echo ""
             echo "**Version source:** \`package.json\` (single source of truth)"
             echo "**Commit:** \`${GITHUB_SHA::7}\`"
