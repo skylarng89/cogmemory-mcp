@@ -161,23 +161,27 @@ function extractAllNames(rootNode: TSNode): Set<string> | null {
   for (const child of rootNode.children) {
     if (child.type !== "expression_statement") continue;
     const expr = child.childForFieldName("body") ?? child.children[0];
-    if (!expr || expr.type !== "assignment") continue;
+    if (expr?.type !== "assignment") continue;
     const left = expr.childForFieldName("left");
-    if (!left || left.text !== "__all__") continue;
+    if (left?.text !== "__all__") continue;
     const right = expr.childForFieldName("right");
     if (!right) continue;
-    const names = new Set<string>();
-    // __all__ can be a list or tuple
-    for (const item of right.children) {
-      if (item.type === "string") {
-        // Strip quotes
-        const val = item.text.replace(/^['"bfru]*/, "").replace(/['"]+$/, "");
-        names.add(val);
-      }
-    }
-    return names.size > 0 ? names : null;
+    return extractNamesFromRightNode(right);
   }
   return null;
+}
+
+function extractNamesFromRightNode(right: TSNode): Set<string> | null {
+  const names = new Set<string>();
+  // __all__ can be a list or tuple
+  for (const item of right.children) {
+    if (item.type === "string") {
+      // Strip quotes
+      const val = item.text.replace(/^['"bfru]*/, "").replace(/['"]+$/, "");
+      names.add(val);
+    }
+  }
+  return names.size > 0 ? names : null;
 }
 
 function handleFunctionDef(
