@@ -1,5 +1,16 @@
 // CogMemory MCP — Shared TypeScript types mirroring the SQLite schema
 
+// ─── PROJECTS ─────────────────────────────────────────
+
+export interface Project {
+  id: number;
+  slug: string;
+  label: string | null;
+  root_path_hint: string | null;
+  created_at: string;
+  last_seen_at: string;
+}
+
 // ─── MEMORY ───────────────────────────────────────────────
 
 export interface Session {
@@ -127,7 +138,7 @@ export interface Symbol {
 
 // Extended Symbol with v1.1.0 columns (mutable via ALTER TABLE migrations)
 export interface SymbolExtended extends Symbol {
-  is_exported: number;   // 0 or 1
+  is_exported: number; // 0 or 1
   body_hash: string | null;
   token_count: number | null;
 }
@@ -166,7 +177,7 @@ export interface CodemapAnnotation {
 export interface IndexError {
   id: number;
   file_path: string;
-  error_type: string;      // 'parse' | 'resolve' | 'io'
+  error_type: string; // 'parse' | 'resolve' | 'io'
   error_message: string;
   occurred_at: string;
 }
@@ -179,7 +190,7 @@ export interface SymbolToken {
 
 export interface SymbolMinhash {
   symbol_id: number;
-  signature: string;       // JSON array of integer hashes
+  signature: string; // JSON array of integer hashes
   num_hashes: number;
   shingle_k: number;
   computed_at: string;
