@@ -350,13 +350,6 @@ function analyzeAndInsert(
     `);
   }
 
-  // Prepare token insert if table exists
-  const insertToken = hasTokensTable
-    ? db.prepare(
-        "INSERT OR IGNORE INTO symbol_tokens (symbol_id, token, tf) VALUES (?, ?, ?)",
-      )
-    : null;
-
   const fileCache = new Map<string, string[]>();
 
   function getFileLines(filePath: string): string[] {
@@ -384,13 +377,21 @@ function analyzeAndInsert(
         symbolIdMap,
         sym,
         getFileLines,
-        { hasFullColumns: hasExported && hasBodyHash && hasTokenCount, hasTokensTable },
+        {
+          hasFullColumns: hasExported && hasBodyHash && hasTokenCount,
+          hasTokensTable,
+        },
         projectId,
       );
     }
   })();
 
-  const newEdgeCount = insertResolvedEdges(db, result.edges, symbolIdMap, projectId);
+  const newEdgeCount = insertResolvedEdges(
+    db,
+    result.edges,
+    symbolIdMap,
+    projectId,
+  );
 
   return { newSymbolCount: result.symbols.length, newEdgeCount };
 }
@@ -406,7 +407,14 @@ function insertAnalyzedSymbol(
   db: Database.Database,
   insertSymbol: Database.Statement,
   symbolIdMap: Map<string, number>,
-  sym: { file_path: string; symbol_name: string; symbol_type: string; start_line: number | null; end_line: number | null; is_exported?: boolean },
+  sym: {
+    file_path: string;
+    symbol_name: string;
+    symbol_type: string;
+    start_line: number | null;
+    end_line: number | null;
+    is_exported?: boolean;
+  },
   getFileLines: (filePath: string) => string[],
   flags: SymbolColumnFlags,
   projectId: number,
@@ -476,7 +484,15 @@ function insertAnalyzedSymbol(
 /** Resolve and insert structural edges; returns the count inserted. */
 function insertResolvedEdges(
   db: Database.Database,
-  edges: Array<{ from_file: string; from_name: string; from_start_line: number | null; to_file: string; to_name: string; to_start_line: number | null; edge_type: string }>,
+  edges: Array<{
+    from_file: string;
+    from_name: string;
+    from_start_line: number | null;
+    to_file: string;
+    to_name: string;
+    to_start_line: number | null;
+    edge_type: string;
+  }>,
   symbolIdMap: Map<string, number>,
   projectId: number,
 ): number {
