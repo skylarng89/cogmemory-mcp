@@ -3,7 +3,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler } from "./utils.js";
+import { wrapHandler, projectPredicate } from "./utils.js";
 
 // ─── SUBSYSTEM REGISTRY ───────────────────────────────────
 // Maps a logical subsystem name to its backing table(s) and metadata so the
@@ -22,6 +22,8 @@ interface TableMeta {
   hasTags: boolean;
   /** Default sort column for list ordering. */
   sortColumn: string;
+  /** Whether the table carries a project_id column (project-scoped subsystem). */
+  hasProject: boolean;
   /** Optional secondary tables to clear when this subsystem is purged. */
   cascadeTables?: string[];
 }
@@ -34,6 +36,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "started_at",
+    hasProject: true,
   },
   {
     subsystem: "decisions",
@@ -42,6 +45,7 @@ const TABLES: TableMeta[] = [
     hasSession: true,
     hasTags: true,
     sortColumn: "created_at",
+    hasProject: true,
   },
   {
     subsystem: "conventions",
@@ -50,6 +54,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: true,
     sortColumn: "updated_at",
+    hasProject: true,
   },
   {
     subsystem: "errors",
@@ -58,6 +63,7 @@ const TABLES: TableMeta[] = [
     hasSession: true,
     hasTags: true,
     sortColumn: "created_at",
+    hasProject: true,
   },
   {
     subsystem: "context",
@@ -66,6 +72,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "updated_at",
+    hasProject: true,
   },
   {
     subsystem: "changelog",
@@ -74,6 +81,7 @@ const TABLES: TableMeta[] = [
     hasSession: true,
     hasTags: false,
     sortColumn: "created_at",
+    hasProject: true,
   },
   {
     subsystem: "plan",
@@ -82,6 +90,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "order_index",
+    hasProject: true,
   },
   {
     subsystem: "tasks",
@@ -90,6 +99,7 @@ const TABLES: TableMeta[] = [
     hasSession: true,
     hasTags: true,
     sortColumn: "created_at",
+    hasProject: true,
   },
   {
     subsystem: "entities",
@@ -98,6 +108,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "created_at",
+    hasProject: true,
     cascadeTables: ["relations", "observations"],
   },
   {
@@ -107,6 +118,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "created_at",
+    hasProject: true,
   },
   {
     subsystem: "observations",
@@ -115,6 +127,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "created_at",
+    hasProject: true,
   },
   {
     subsystem: "specs",
@@ -123,6 +136,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "updated_at",
+    hasProject: true,
   },
   {
     subsystem: "symbols",
@@ -131,15 +145,18 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "file_path",
+    hasProject: true,
     cascadeTables: ["edges"],
   },
   {
     subsystem: "edges",
     table: "edges",
-    description: "Code graph edges (calls/imports/extends/implements + SIMILAR_TO, SEMANTICALLY_RELATED)",
+    description:
+      "Code graph edges (calls/imports/extends/implements + SIMILAR_TO, SEMANTICALLY_RELATED)",
     hasSession: false,
     hasTags: false,
     sortColumn: "created_at",
+    hasProject: true,
   },
   {
     subsystem: "execution_traces",
@@ -148,6 +165,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "created_at",
+    hasProject: true,
   },
   {
     subsystem: "codemap_annotations",
@@ -156,6 +174,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "created_at",
+    hasProject: true,
   },
   {
     subsystem: "file_index",
@@ -164,6 +183,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "file_path",
+    hasProject: true,
   },
   {
     subsystem: "index_errors",
@@ -172,6 +192,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "occurred_at",
+    hasProject: true,
   },
   {
     subsystem: "symbol_tokens",
@@ -180,6 +201,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "symbol_id",
+    hasProject: false,
   },
   {
     subsystem: "symbol_minhash",
@@ -188,6 +210,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "symbol_id",
+    hasProject: false,
   },
   {
     subsystem: "symbol_embeddings",
@@ -196,6 +219,7 @@ const TABLES: TableMeta[] = [
     hasSession: false,
     hasTags: false,
     sortColumn: "symbol_id",
+    hasProject: false,
   },
 ];
 
@@ -271,6 +295,7 @@ export const PurgeSubsystemSchema = z.object({
 export function registerListDeleteTools(
   server: McpServer,
   db: Database.Database,
+  projectId: number,
 ): void {
   // ── list_items ──
   server.registerTool(
@@ -338,6 +363,12 @@ export function registerListDeleteTools(
           params.push(`%${tags}%`);
         }
 
+        // Implicit project scoping (FR5) for project-scoped subsystems
+        if (meta.hasProject) {
+          conds.push(projectPredicate());
+          params.push(projectId);
+        }
+
         const where = conds.length > 0 ? `WHERE ${conds.join(" AND ")}` : "";
         const rows = db
           .prepare(
@@ -345,11 +376,19 @@ export function registerListDeleteTools(
           )
           .all(...params, lim);
 
-        const total = (
-          db.prepare(`SELECT COUNT(*) as cnt FROM ${meta.table}`).get() as {
-            cnt: number;
-          }
-        ).cnt;
+        const total = meta.hasProject
+          ? (
+              db
+                .prepare(
+                  `SELECT COUNT(*) as cnt FROM ${meta.table} WHERE ${projectPredicate()}`,
+                )
+                .get(projectId) as { cnt: number }
+            ).cnt
+          : (
+              db.prepare(`SELECT COUNT(*) as cnt FROM ${meta.table}`).get() as {
+                cnt: number;
+              }
+            ).cnt;
 
         return {
           content: [
@@ -410,9 +449,13 @@ export function registerListDeleteTools(
         };
       }
 
-      const result = db
-        .prepare(`DELETE FROM ${meta.table} WHERE id = ?`)
-        .run(id);
+      const result = meta.hasProject
+        ? db
+            .prepare(
+              `DELETE FROM ${meta.table} WHERE id = ? AND ${projectPredicate()}`,
+            )
+            .run(id, projectId)
+        : db.prepare(`DELETE FROM ${meta.table} WHERE id = ?`).run(id);
       if (result.changes === 0) {
         return {
           content: [
@@ -449,7 +492,9 @@ export function registerListDeleteTools(
       inputSchema: DeleteByKeySchema,
     },
     wrapHandler("delete_by_key", async ({ key }) => {
-      const result = db.prepare("DELETE FROM context WHERE key = ?").run(key);
+      const result = db
+        .prepare(`DELETE FROM context WHERE key = ? AND ${projectPredicate()}`)
+        .run(key, projectId);
       if (result.changes === 0) {
         return {
           content: [
@@ -487,8 +532,10 @@ export function registerListDeleteTools(
     },
     wrapHandler("delete_by_path", async ({ file_path }) => {
       const result = db
-        .prepare("DELETE FROM file_index WHERE file_path = ?")
-        .run(file_path);
+        .prepare(
+          `DELETE FROM file_index WHERE file_path = ? AND ${projectPredicate()}`,
+        )
+        .run(file_path, projectId);
       if (result.changes === 0) {
         return {
           content: [
@@ -556,22 +603,44 @@ export function registerListDeleteTools(
       }
 
       const deleted: Record<string, number> = {};
+      const p = projectPredicate();
       db.transaction(() => {
-        const primary = (
-          db.prepare(`SELECT COUNT(*) as cnt FROM ${meta.table}`).get() as {
-            cnt: number;
-          }
-        ).cnt;
-        db.exec(`DELETE FROM ${meta.table}`);
+        const primary = meta.hasProject
+          ? (
+              db
+                .prepare(`SELECT COUNT(*) as cnt FROM ${meta.table} WHERE ${p}`)
+                .get(projectId) as { cnt: number }
+            ).cnt
+          : (
+              db.prepare(`SELECT COUNT(*) as cnt FROM ${meta.table}`).get() as {
+                cnt: number;
+              }
+            ).cnt;
+        if (meta.hasProject) {
+          db.prepare(`DELETE FROM ${meta.table} WHERE ${p}`).run(projectId);
+        } else {
+          db.exec(`DELETE FROM ${meta.table}`);
+        }
         deleted[meta.table] = primary;
 
         for (const dep of meta.cascadeTables ?? []) {
-          const depCount = (
-            db.prepare(`SELECT COUNT(*) as cnt FROM ${dep}`).get() as {
-              cnt: number;
-            }
-          ).cnt;
-          db.exec(`DELETE FROM ${dep}`);
+          const depHasProject = findTable(dep)?.hasProject ?? false;
+          const depCount = depHasProject
+            ? (
+                db
+                  .prepare(`SELECT COUNT(*) as cnt FROM ${dep} WHERE ${p}`)
+                  .get(projectId) as { cnt: number }
+              ).cnt
+            : (
+                db.prepare(`SELECT COUNT(*) as cnt FROM ${dep}`).get() as {
+                  cnt: number;
+                }
+              ).cnt;
+          if (depHasProject) {
+            db.prepare(`DELETE FROM ${dep} WHERE ${p}`).run(projectId);
+          } else {
+            db.exec(`DELETE FROM ${dep}`);
+          }
           deleted[dep] = depCount;
         }
       })();

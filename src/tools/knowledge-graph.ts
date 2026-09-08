@@ -3,7 +3,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler } from "./utils.js";
+import { wrapHandler, projectPredicate } from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -63,6 +63,7 @@ export const SearchKnowledgeSchema = z.object({
 export function registerKnowledgeGraphTools(
   server: McpServer,
   db: Database.Database,
+  projectId: number,
 ): void {
   // ── create_entity ──
   server.registerTool(
@@ -74,16 +75,18 @@ export function registerKnowledgeGraphTools(
     },
     wrapHandler("create_entity", async ({ name, type }) => {
       const stmt = db.prepare(`
-        INSERT INTO entities (name, type)
-        VALUES (?, ?)
-        ON CONFLICT(name, type) DO NOTHING
+        INSERT INTO entities (project_id, name, type)
+        VALUES (?, ?, ?)
+        ON CONFLICT(project_id, name, type) DO NOTHING
       `);
-      const result = stmt.run(name, type);
+      const result = stmt.run(projectId, name, type);
 
       // Fetch the entity (either newly created or existing)
       const entity = db
-        .prepare("SELECT * FROM entities WHERE name = ? AND type = ?")
-        .get(name, type);
+        .prepare(
+          `SELECT * FROM entities WHERE name = ? AND type = ? AND ${projectPredicate()}`,
+        )
+        .get(name, type, projectId);
 
       return {
         content: [
@@ -110,13 +113,17 @@ export function registerKnowledgeGraphTools(
     wrapHandler(
       "create_relation",
       async ({ from_entity_id, to_entity_id, relation_type }) => {
-        // Validate both entities exist
+        // Validate both entities exist (and belong to this project)
         const fromEntity = db
-          .prepare("SELECT id FROM entities WHERE id = ?")
-          .get(from_entity_id);
+          .prepare(
+            `SELECT id FROM entities WHERE id = ? AND ${projectPredicate()}`,
+          )
+          .get(from_entity_id, projectId);
         const toEntity = db
-          .prepare("SELECT id FROM entities WHERE id = ?")
-          .get(to_entity_id);
+          .prepare(
+            `SELECT id FROM entities WHERE id = ? AND ${projectPredicate()}`,
+          )
+          .get(to_entity_id, projectId);
 
         if (!fromEntity) {
           return {
@@ -146,11 +153,16 @@ export function registerKnowledgeGraphTools(
         }
 
         const stmt = db.prepare(`
-        INSERT INTO relations (from_entity_id, to_entity_id, relation_type)
-        VALUES (?, ?, ?)
-        ON CONFLICT(from_entity_id, to_entity_id, relation_type) DO NOTHING
+        INSERT INTO relations (project_id, from_entity_id, to_entity_id, relation_type)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(project_id, from_entity_id, to_entity_id, relation_type) DO NOTHING
       `);
-        const result = stmt.run(from_entity_id, to_entity_id, relation_type);
+        const result = stmt.run(
+          projectId,
+          from_entity_id,
+          to_entity_id,
+          relation_type,
+        );
 
         return {
           content: [
@@ -176,10 +188,12 @@ export function registerKnowledgeGraphTools(
       inputSchema: AddObservationSchema,
     },
     wrapHandler("add_observation", async ({ entity_id, content }) => {
-      // Validate entity exists
+      // Validate entity exists (and belongs to this project)
       const entity = db
-        .prepare("SELECT id FROM entities WHERE id = ?")
-        .get(entity_id);
+        .prepare(
+          `SELECT id FROM entities WHERE id = ? AND ${projectPredicate()}`,
+        )
+        .get(entity_id, projectId);
 
       if (!entity) {
         return {
@@ -196,10 +210,10 @@ export function registerKnowledgeGraphTools(
       }
 
       const stmt = db.prepare(`
-        INSERT INTO observations (entity_id, content)
-        VALUES (?, ?)
+        INSERT INTO observations (project_id, entity_id, content)
+        VALUES (?, ?, ?)
       `);
-      const result = stmt.run(entity_id, content);
+      const result = stmt.run(projectId, entity_id, content);
 
       return {
         content: [
@@ -252,6 +266,8 @@ export function registerKnowledgeGraphTools(
             entConds.push("e.type = ?");
             entParams.push(entity_type);
           }
+          entConds.push(projectPredicate("e"));
+          entParams.push(projectId);
 
           const entWhere =
             entConds.length > 0 ? `WHERE ${entConds.join(" AND ")}` : "";
@@ -272,10 +288,10 @@ export function registerKnowledgeGraphTools(
              FROM relations r
              JOIN entities fe ON r.from_entity_id = fe.id
              JOIN entities te ON r.to_entity_id = te.id
-             WHERE r.relation_type LIKE ?
+             WHERE r.relation_type LIKE ? AND ${projectPredicate("r")}
              ORDER BY r.created_at DESC LIMIT ?`,
             )
-            .all(`%${relation_type}%`, lim);
+            .all(`%${relation_type}%`, projectId, lim);
         } else {
           results.relations = [];
         }
@@ -288,9 +304,10 @@ export function registerKnowledgeGraphTools(
              FROM observations o
              JOIN entities e ON o.entity_id = e.id
              WHERE o.id IN (SELECT doc_id FROM kg_docs kd JOIN kg_fts kf ON kf.rowid = kd.id WHERE kg_fts MATCH ? AND kd.source = 'observations')
+               AND ${projectPredicate("o")}
              ORDER BY o.created_at DESC LIMIT ?`,
             )
-            .all(observation_text, lim);
+            .all(observation_text, projectId, lim);
         } else {
           results.observations = [];
         }

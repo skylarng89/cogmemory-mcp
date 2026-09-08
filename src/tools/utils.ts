@@ -92,3 +92,27 @@ export function resolvePlanId(
   const exists = db.prepare("SELECT 1 FROM plan WHERE id = ?").get(plan_id);
   return exists ? plan_id : null;
 }
+
+/**
+ * Build a WHERE-clause fragment scoping queries to a single project.
+ *
+ * - `whereWith("d")` → "d.project_id = ?"
+ * - `whereWith()` → "project_id = ?" (unaliased)
+ *
+ * Use with the projectId param appended to the query's bound parameters.
+ */
+export function projectPredicate(alias?: string): string {
+  return alias ? `${alias}.project_id = ?` : "project_id = ?";
+}
+
+/**
+ * Append a project predicate to an existing WHERE fragment list.
+ * Mutates nothing — returns a new array with the predicate added.
+ */
+export function withProject(
+  conds: string[],
+  projectId: number,
+  alias?: string,
+): { conds: string[]; param: number } {
+  return { conds: [...conds, projectPredicate(alias)], param: projectId };
+}

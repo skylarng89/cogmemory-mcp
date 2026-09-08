@@ -3,7 +3,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler } from "./utils.js";
+import { wrapHandler, projectPredicate } from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -56,6 +56,7 @@ export const AnnotateSymbolSchema = z
 export function registerCodemapTools(
   server: McpServer,
   db: Database.Database,
+  projectId: number,
 ): void {
   // ── generate_codemap ──
   server.registerTool(
@@ -82,7 +83,7 @@ export function registerCodemapTools(
         // Find entry symbol(s)
         const entrySymbols = db
           .prepare(
-            `SELECT * FROM symbols WHERE symbol_name = ? ORDER BY
+            `SELECT * FROM symbols WHERE symbol_name = ? AND ${projectPredicate()} ORDER BY
            CASE symbol_type
              WHEN 'function' THEN 1
              WHEN 'class' THEN 2
@@ -92,7 +93,7 @@ export function registerCodemapTools(
            END,
            updated_at DESC LIMIT 5`,
           )
-          .all(entry_symbol) as Record<string, unknown>[];
+          .all(entry_symbol, projectId) as Record<string, unknown>[];
 
         if (entrySymbols.length === 0) {
           return {
@@ -212,10 +213,11 @@ export function registerCodemapTools(
             resultNodes.map((n) => (n.symbol as Record<string, unknown>).id),
           );
           const stmt = db.prepare(`
-          INSERT INTO execution_traces (name, description, symbol_sequence)
-          VALUES (?, ?, ?)
+          INSERT INTO execution_traces (project_id, name, description, symbol_sequence)
+          VALUES (?, ?, ?, ?)
         `);
           const result = stmt.run(
+            projectId,
             save_as_trace,
             trace_description ?? null,
             symbolSequence,
@@ -266,8 +268,10 @@ export function registerCodemapTools(
         // Validate symbol_id if provided
         if (symbol_id !== undefined) {
           const symbol = db
-            .prepare("SELECT id FROM symbols WHERE id = ?")
-            .get(symbol_id);
+            .prepare(
+              `SELECT id FROM symbols WHERE id = ? AND ${projectPredicate()}`,
+            )
+            .get(symbol_id, projectId);
           if (!symbol) {
             return {
               content: [
@@ -286,8 +290,10 @@ export function registerCodemapTools(
         // Validate trace_id if provided
         if (trace_id !== undefined) {
           const trace = db
-            .prepare("SELECT id FROM execution_traces WHERE id = ?")
-            .get(trace_id);
+            .prepare(
+              `SELECT id FROM execution_traces WHERE id = ? AND ${projectPredicate()}`,
+            )
+            .get(trace_id, projectId);
           if (!trace) {
             return {
               content: [
@@ -304,10 +310,11 @@ export function registerCodemapTools(
         }
 
         const stmt = db.prepare(`
-        INSERT INTO codemap_annotations (symbol_id, trace_id, annotation)
-        VALUES (?, ?, ?)
+        INSERT INTO codemap_annotations (project_id, symbol_id, trace_id, annotation)
+        VALUES (?, ?, ?, ?)
       `);
         const result = stmt.run(
+          projectId,
           symbol_id ?? null,
           trace_id ?? null,
           annotation,

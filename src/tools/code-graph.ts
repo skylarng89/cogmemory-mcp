@@ -4,11 +4,14 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
 import { walkFilesWithMtime } from "../indexing/walker.js";
-import { analyzeMixed, getSupportedExtensions } from "../indexing/analyzer-registry.js";
+import {
+  analyzeMixed,
+  getSupportedExtensions,
+} from "../indexing/analyzer-registry.js";
 import { resolve } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { wrapHandler, jsonOk } from "./utils.js";
+import { wrapHandler, jsonOk, projectPredicate } from "./utils.js";
 // EDGE_TYPES and STRUCTURAL_EDGE_TYPES are imported but not used in this file
 // They were previously used for validation but are no longer needed
 
@@ -21,22 +24,144 @@ function getDefaultExtensions(): string[] {
 // ─── Tokenizer (same as code-analysis.ts) ───────────────
 
 const STOPWORDS = new Set([
-  "the","a","an","is","are","was","were","be","been","being",
-  "have","has","had","do","does","did","will","would","could",
-  "should","may","might","must","shall","can","need","to","of",
-  "in","for","on","with","at","by","from","as","into","through",
-  "during","before","after","above","below","between","out","off",
-  "under","again","further","then","once","here","there","when",
-  "where","why","how","all","both","each","few","more","most",
-  "other","some","such","no","nor","not","only","own","same",
-  "so","than","too","very","just","because","but","and","or",
-  "if","while","this","that","these","those","i","me","my",
-  "we","our","you","your","he","him","his","she","her","it",
-  "its","they","them","their","what","which","who","whom",
-  "function","const","let","var","return","import","from","export",
-  "default","class","interface","type","enum","async","await",
-  "def","self","lambda","yield","pass","raise","try","except",
-  "finally","with","as","global","nonlocal","assert","del",
+  "the",
+  "a",
+  "an",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "have",
+  "has",
+  "had",
+  "do",
+  "does",
+  "did",
+  "will",
+  "would",
+  "could",
+  "should",
+  "may",
+  "might",
+  "must",
+  "shall",
+  "can",
+  "need",
+  "to",
+  "of",
+  "in",
+  "for",
+  "on",
+  "with",
+  "at",
+  "by",
+  "from",
+  "as",
+  "into",
+  "through",
+  "during",
+  "before",
+  "after",
+  "above",
+  "below",
+  "between",
+  "out",
+  "off",
+  "under",
+  "again",
+  "further",
+  "then",
+  "once",
+  "here",
+  "there",
+  "when",
+  "where",
+  "why",
+  "how",
+  "all",
+  "both",
+  "each",
+  "few",
+  "more",
+  "most",
+  "other",
+  "some",
+  "such",
+  "no",
+  "nor",
+  "not",
+  "only",
+  "own",
+  "same",
+  "so",
+  "than",
+  "too",
+  "very",
+  "just",
+  "because",
+  "but",
+  "and",
+  "or",
+  "if",
+  "while",
+  "this",
+  "that",
+  "these",
+  "those",
+  "i",
+  "me",
+  "my",
+  "we",
+  "our",
+  "you",
+  "your",
+  "he",
+  "him",
+  "his",
+  "she",
+  "her",
+  "it",
+  "its",
+  "they",
+  "them",
+  "their",
+  "what",
+  "which",
+  "who",
+  "whom",
+  "function",
+  "const",
+  "let",
+  "var",
+  "return",
+  "import",
+  "from",
+  "export",
+  "default",
+  "class",
+  "interface",
+  "type",
+  "enum",
+  "async",
+  "await",
+  "def",
+  "self",
+  "lambda",
+  "yield",
+  "pass",
+  "raise",
+  "try",
+  "except",
+  "finally",
+  "with",
+  "as",
+  "global",
+  "nonlocal",
+  "assert",
+  "del",
 ]);
 
 function tokenizeSymbolBody(text: string): string[] {
@@ -53,7 +178,11 @@ function computeBodyHash(bodyText: string): string {
 
 // ─── Schema-aware column check ──────────────────────────
 
-function tableHasColumn(db: Database.Database, table: string, column: string): boolean {
+function tableHasColumn(
+  db: Database.Database,
+  table: string,
+  column: string,
+): boolean {
   try {
     const cols = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
     return cols.some((c) => c.name === column);
@@ -83,14 +212,28 @@ function classifyFiles(
   storedFiles: Map<string, number>,
   isFull: boolean,
   db: Database.Database,
+  projectId: number,
 ): ClassifyResult {
   if (isFull) {
-    db.exec("DELETE FROM edges");
-    db.exec("DELETE FROM symbols");
-    db.exec("DELETE FROM file_index");
+    const p = projectPredicate();
+    db.prepare(`DELETE FROM edges WHERE ${p}`).run(projectId);
+    db.prepare(`DELETE FROM symbols WHERE ${p}`).run(projectId);
+    db.prepare(`DELETE FROM file_index WHERE ${p}`).run(projectId);
     // Also clear derived tables if they exist
-    try { db.exec("DELETE FROM symbol_tokens"); } catch { /* table may not exist */ }
-    try { db.exec("DELETE FROM symbol_minhash"); } catch { /* table may not exist */ }
+    try {
+      db.prepare(
+        `DELETE FROM symbol_tokens WHERE symbol_id IN (SELECT id FROM symbols WHERE ${p})`,
+      ).run(projectId);
+    } catch {
+      /* table may not exist */
+    }
+    try {
+      db.prepare(
+        `DELETE FROM symbol_minhash WHERE symbol_id IN (SELECT id FROM symbols WHERE ${p})`,
+      ).run(projectId);
+    } catch {
+      /* table may not exist */
+    }
     return { filesToAnalyze: [...currentFiles.keys()], deletedFiles: [] };
   }
 
@@ -114,14 +257,17 @@ function classifyFiles(
 
   const filesToDelete = [...deletedFiles, ...changedFiles];
   if (filesToDelete.length > 0) {
-    const deleteSymbols = db.prepare("DELETE FROM symbols WHERE file_path = ?");
+    const p = projectPredicate();
+    const deleteSymbols = db.prepare(
+      `DELETE FROM symbols WHERE file_path = ? AND ${p}`,
+    );
     const deleteFileIdx = db.prepare(
-      "DELETE FROM file_index WHERE file_path = ?",
+      `DELETE FROM file_index WHERE file_path = ? AND ${p}`,
     );
     db.transaction(() => {
       for (const path of filesToDelete) {
-        deleteSymbols.run(path);
-        deleteFileIdx.run(path);
+        deleteSymbols.run(path, projectId);
+        deleteFileIdx.run(path, projectId);
       }
     })();
   }
@@ -132,12 +278,15 @@ function classifyFiles(
 function buildSymbolIdMap(
   isFull: boolean,
   db: Database.Database,
+  projectId: number,
 ): Map<string, number> {
   const symbolIdMap = new Map<string, number>();
   if (!isFull) {
     const existingSymbols = db
-      .prepare("SELECT id, file_path, symbol_name, start_line FROM symbols")
-      .all() as {
+      .prepare(
+        `SELECT id, file_path, symbol_name, start_line FROM symbols WHERE ${projectPredicate()}`,
+      )
+      .all(projectId) as {
       id: number;
       file_path: string;
       symbol_name: string;
@@ -173,6 +322,7 @@ function analyzeAndInsert(
   targetDir: string,
   db: Database.Database,
   symbolIdMap: Map<string, number>,
+  projectId: number,
 ): { newSymbolCount: number; newEdgeCount: number } {
   if (filesToAnalyze.length === 0) {
     return { newSymbolCount: 0, newEdgeCount: 0 };
@@ -190,19 +340,21 @@ function analyzeAndInsert(
   let insertSymbol: Database.Statement;
   if (hasExported && hasBodyHash && hasTokenCount) {
     insertSymbol = db.prepare(`
-      INSERT INTO symbols (file_path, symbol_name, symbol_type, start_line, end_line, is_exported, body_hash, token_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO symbols (project_id, file_path, symbol_name, symbol_type, start_line, end_line, is_exported, body_hash, token_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
   } else {
     insertSymbol = db.prepare(`
-      INSERT INTO symbols (file_path, symbol_name, symbol_type, start_line, end_line)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO symbols (project_id, file_path, symbol_name, symbol_type, start_line, end_line)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
   }
 
   // Prepare token insert if table exists
   const insertToken = hasTokensTable
-    ? db.prepare("INSERT OR IGNORE INTO symbol_tokens (symbol_id, token, tf) VALUES (?, ?, ?)")
+    ? db.prepare(
+        "INSERT OR IGNORE INTO symbol_tokens (symbol_id, token, tf) VALUES (?, ?, ?)",
+      )
     : null;
 
   const fileCache = new Map<string, string[]>();
@@ -240,6 +392,7 @@ function analyzeAndInsert(
       let symbolId: number;
       if (hasExported && hasBodyHash && hasTokenCount) {
         const r = insertSymbol.run(
+          projectId,
           sym.file_path,
           sym.symbol_name,
           sym.symbol_type,
@@ -252,6 +405,7 @@ function analyzeAndInsert(
         symbolId = r.lastInsertRowid as number;
       } else {
         const r = insertSymbol.run(
+          projectId,
           sym.file_path,
           sym.symbol_name,
           sym.symbol_type,
@@ -284,8 +438,8 @@ function analyzeAndInsert(
 
   let newEdgeCount = 0;
   const insertEdge = db.prepare(`
-    INSERT INTO edges (from_symbol_id, to_symbol_id, edge_type)
-    VALUES (?, ?, ?)
+    INSERT INTO edges (project_id, from_symbol_id, to_symbol_id, edge_type)
+    VALUES (?, ?, ?, ?)
   `);
   db.transaction(() => {
     for (const edge of result.edges) {
@@ -303,7 +457,7 @@ function analyzeAndInsert(
       );
       if (fromId && toId) {
         try {
-          insertEdge.run(fromId, toId, edge.edge_type);
+          insertEdge.run(projectId, fromId, toId, edge.edge_type);
           newEdgeCount++;
         } catch {
           // Skip duplicate edges
@@ -326,13 +480,14 @@ function analyzeAndInsert(
 function resolveCrossFileEdges(
   targetDir: string,
   db: Database.Database,
+  projectId: number,
 ): number {
   // Build a global map: (file_path, symbol_name) → symbol_id for exported symbols
   const exportedSymbols = db
     .prepare(
-      `SELECT id, file_path, symbol_name FROM symbols WHERE is_exported = 1 AND symbol_type != 'file'`,
+      `SELECT id, file_path, symbol_name FROM symbols WHERE is_exported = 1 AND symbol_type != 'file' AND ${projectPredicate()}`,
     )
-    .all() as { id: number; file_path: string; symbol_name: string }[];
+    .all(projectId) as { id: number; file_path: string; symbol_name: string }[];
   const exportMap = new Map<string, number>();
   for (const sym of exportedSymbols) {
     exportMap.set(`${sym.file_path}:${sym.symbol_name}`, sym.id);
@@ -340,8 +495,10 @@ function resolveCrossFileEdges(
 
   // Also build a non-exported fallback map (for names that match unexported symbols)
   const allSymbols = db
-    .prepare(`SELECT id, file_path, symbol_name FROM symbols WHERE symbol_type != 'file'`)
-    .all() as { id: number; file_path: string; symbol_name: string }[];
+    .prepare(
+      `SELECT id, file_path, symbol_name FROM symbols WHERE symbol_type != 'file' AND ${projectPredicate()}`,
+    )
+    .all(projectId) as { id: number; file_path: string; symbol_name: string }[];
   const nameMap = new Map<string, { id: number; file_path: string }[]>();
   for (const sym of allSymbols) {
     const list = nameMap.get(sym.symbol_name) ?? [];
@@ -349,7 +506,7 @@ function resolveCrossFileEdges(
     nameMap.set(sym.symbol_name, list);
   }
 
-  // Get all import edges
+  // Get all import edges (scoped to this project's symbols)
   const importEdges = db
     .prepare(
       `SELECT e.id AS edge_id, e.from_symbol_id, e.to_symbol_id,
@@ -358,9 +515,9 @@ function resolveCrossFileEdges(
        FROM edges e
        JOIN symbols fs ON e.from_symbol_id = fs.id
        JOIN symbols ts ON e.to_symbol_id = ts.id
-       WHERE e.edge_type = 'imports'`,
+       WHERE e.edge_type = 'imports' AND ${projectPredicate("e")}`,
     )
-    .all() as {
+    .all(projectId) as {
     edge_id: number;
     from_symbol_id: number;
     to_symbol_id: number;
@@ -372,8 +529,8 @@ function resolveCrossFileEdges(
   // For each import edge, try to find the concrete exported symbol in
   // the target file and create a "resolves" edge.
   const insertEdge = db.prepare(`
-    INSERT OR IGNORE INTO edges (from_symbol_id, to_symbol_id, edge_type)
-    VALUES (?, ?, ?)
+    INSERT OR IGNORE INTO edges (project_id, from_symbol_id, to_symbol_id, edge_type)
+    VALUES (?, ?, ?, ?)
   `);
 
   let resolved = 0;
@@ -393,7 +550,7 @@ function resolveCrossFileEdges(
       const matchKey = `${targetFile}:${edge.to_name}`;
       const exportedId = exportMap.get(matchKey);
       if (exportedId) {
-        insertEdge.run(edge.from_symbol_id, exportedId, "resolves");
+        insertEdge.run(projectId, edge.from_symbol_id, exportedId, "resolves");
         resolved++;
         continue;
       }
@@ -403,7 +560,7 @@ function resolveCrossFileEdges(
       if (candidates) {
         const exact = candidates.find((c) => c.file_path === targetFile);
         if (exact) {
-          insertEdge.run(edge.from_symbol_id, exact.id, "resolves");
+          insertEdge.run(projectId, edge.from_symbol_id, exact.id, "resolves");
           resolved++;
         }
       }
@@ -417,17 +574,19 @@ function updateFileIndex(
   db: Database.Database,
   filesToAnalyze: string[],
   currentFiles: Map<string, number>,
+  projectId: number,
 ): void {
   const upsertFileIndex = db.prepare(`
-    INSERT INTO file_index (file_path, mtime_ms, indexed_at)
-    VALUES (?, ?, datetime('now'))
+    INSERT INTO file_index (project_id, file_path, mtime_ms, indexed_at)
+    VALUES (?, ?, ?, datetime('now'))
     ON CONFLICT(file_path) DO UPDATE SET
+      project_id = excluded.project_id,
       mtime_ms = excluded.mtime_ms,
       indexed_at = datetime('now')
   `);
   db.transaction(() => {
     for (const path of filesToAnalyze) {
-      upsertFileIndex.run(path, currentFiles.get(path)!);
+      upsertFileIndex.run(projectId, path, currentFiles.get(path)!);
     }
   })();
 }
@@ -437,12 +596,19 @@ function buildIndexStatusResponse(
   db: Database.Database,
   isFull: boolean,
   targetDir: string,
+  projectId: number,
 ) {
   const symCount = (
-    db.prepare("SELECT COUNT(*) as cnt FROM symbols").get() as { cnt: number }
+    db
+      .prepare(
+        `SELECT COUNT(*) as cnt FROM symbols WHERE ${projectPredicate()}`,
+      )
+      .get(projectId) as { cnt: number }
   ).cnt;
   const edgeCount = (
-    db.prepare("SELECT COUNT(*) as cnt FROM edges").get() as { cnt: number }
+    db
+      .prepare(`SELECT COUNT(*) as cnt FROM edges WHERE ${projectPredicate()}`)
+      .get(projectId) as { cnt: number }
   ).cnt;
   return {
     content: [
@@ -479,18 +645,25 @@ interface IndexResultOpts {
 function buildIndexResultResponse(
   opts: IndexResultOpts,
   db: Database.Database,
+  projectId: number,
 ) {
   const totalSymbols = (
-    db.prepare("SELECT COUNT(*) as cnt FROM symbols").get() as { cnt: number }
+    db
+      .prepare(
+        `SELECT COUNT(*) as cnt FROM symbols WHERE ${projectPredicate()}`,
+      )
+      .get(projectId) as { cnt: number }
   ).cnt;
   const totalEdges = (
-    db.prepare("SELECT COUNT(*) as cnt FROM edges").get() as { cnt: number }
+    db
+      .prepare(`SELECT COUNT(*) as cnt FROM edges WHERE ${projectPredicate()}`)
+      .get(projectId) as { cnt: number }
   ).cnt;
   return {
     content: [
       {
         type: "text" as const,
-          text: JSON.stringify({
+        text: JSON.stringify({
           success: true,
           message: opts.isFull
             ? `Full index of ${opts.targetDir}`
@@ -558,6 +731,7 @@ export function registerCodeGraphTools(
   server: McpServer,
   db: Database.Database,
   workspaceRoot: string,
+  projectId: number,
 ): void {
   // ── index_codebase ──
   server.registerTool(
@@ -589,8 +763,10 @@ export function registerCodeGraphTools(
         }
 
         const storedIndex = db
-          .prepare("SELECT file_path, mtime_ms FROM file_index")
-          .all() as { file_path: string; mtime_ms: number }[];
+          .prepare(
+            `SELECT file_path, mtime_ms FROM file_index WHERE ${projectPredicate()}`,
+          )
+          .all(projectId) as { file_path: string; mtime_ms: number }[];
         const storedFiles = new Map(
           storedIndex.map((f) => [f.file_path, f.mtime_ms]),
         );
@@ -601,6 +777,7 @@ export function registerCodeGraphTools(
           storedFiles,
           isFull,
           db,
+          projectId,
         );
 
         if (filesToAnalyze.length === 0 && deletedFiles.length === 0) {
@@ -609,19 +786,25 @@ export function registerCodeGraphTools(
             db,
             isFull,
             targetDir,
+            projectId,
           );
         }
 
-        const symbolIdMap = buildSymbolIdMap(isFull, db);
+        const symbolIdMap = buildSymbolIdMap(isFull, db, projectId);
         const { newSymbolCount, newEdgeCount } = analyzeAndInsert(
           filesToAnalyze,
           targetDir,
           db,
           symbolIdMap,
+          projectId,
         );
         // Cross-file resolution: link imports to their target exported symbols
-        const resolvedEdgeCount = resolveCrossFileEdges(targetDir, db);
-        updateFileIndex(db, filesToAnalyze, currentFiles);
+        const resolvedEdgeCount = resolveCrossFileEdges(
+          targetDir,
+          db,
+          projectId,
+        );
+        updateFileIndex(db, filesToAnalyze, currentFiles, projectId);
 
         return buildIndexResultResponse(
           {
@@ -635,6 +818,7 @@ export function registerCodeGraphTools(
             resolvedEdgeCount: resolvedEdgeCount,
           },
           db,
+          projectId,
         );
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err);
@@ -669,25 +853,29 @@ export function registerCodeGraphTools(
 
         if (symbol_id !== undefined) {
           symbol = db
-            .prepare("SELECT * FROM symbols WHERE id = ?")
-            .get(symbol_id) as Record<string, unknown> | undefined;
+            .prepare(
+              `SELECT * FROM symbols WHERE id = ? AND ${projectPredicate()}`,
+            )
+            .get(symbol_id, projectId) as Record<string, unknown> | undefined;
         } else if (symbol_name) {
           // Prefer non-file symbols, then most recent
           symbol = db
             .prepare(
-              `SELECT * FROM symbols WHERE symbol_name = ? AND symbol_type != 'file' ORDER BY updated_at DESC LIMIT 1`,
+              `SELECT * FROM symbols WHERE symbol_name = ? AND symbol_type != 'file' AND ${projectPredicate()} ORDER BY updated_at DESC LIMIT 1`,
             )
-            .get(symbol_name) as Record<string, unknown> | undefined;
+            .get(symbol_name, projectId) as Record<string, unknown> | undefined;
 
           symbol ??= db
-            .prepare(`SELECT * FROM symbols WHERE symbol_name = ? LIMIT 1`)
-            .get(symbol_name) as Record<string, unknown> | undefined;
+            .prepare(
+              `SELECT * FROM symbols WHERE symbol_name = ? AND ${projectPredicate()} LIMIT 1`,
+            )
+            .get(symbol_name, projectId) as Record<string, unknown> | undefined;
         } else if (file_path) {
           const symbols = db
             .prepare(
-              "SELECT * FROM symbols WHERE file_path = ? ORDER BY start_line",
+              `SELECT * FROM symbols WHERE file_path = ? AND ${projectPredicate()} ORDER BY start_line`,
             )
-            .all(file_path);
+            .all(file_path, projectId);
 
           return {
             content: [

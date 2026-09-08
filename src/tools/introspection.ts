@@ -3,16 +3,15 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler, jsonOk, jsonErr } from "./utils.js";
+import { wrapHandler, jsonOk, projectPredicate } from "./utils.js";
 import { VERSION } from "../version.js";
+import type { ProjectIdentity } from "../config.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 
 // ─── Constants ──────────────────────────────────────────
 
-const NPM_REGISTRY_URL =
-  "https://registry.npmjs.org/cogmemory-mcp/latest";
+const NPM_REGISTRY_URL = "https://registry.npmjs.org/cogmemory-mcp/latest";
 
 const CACHE_KEY = "npm_latest_version_cache";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -70,14 +69,31 @@ const TABLE_NAMES = [
 
 function getTableCounts(
   db: Database.Database,
+  projectId?: number,
 ): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const table of TABLE_NAMES) {
     try {
-      const row = db
-        .prepare(`SELECT COUNT(*) as cnt FROM ${table}`)
-        .get() as { cnt: number };
-      counts[table] = row.cnt;
+      if (projectId !== undefined) {
+        // Project-scoped count; tables without a project_id column report -1
+        const cols = db.pragma(`table_info(${table})`) as Array<{
+          name: string;
+        }>;
+        const hasProject = cols.some((c) => c.name === "project_id");
+        if (!hasProject) {
+          counts[table] = -1;
+          continue;
+        }
+        const row = db
+          .prepare(`SELECT COUNT(*) as cnt FROM ${table} WHERE project_id = ?`)
+          .get(projectId) as { cnt: number };
+        counts[table] = row.cnt;
+      } else {
+        const row = db
+          .prepare(`SELECT COUNT(*) as cnt FROM ${table}`)
+          .get() as { cnt: number };
+        counts[table] = row.cnt;
+      }
     } catch {
       // Table may not exist if migration hasn't run yet
       counts[table] = -1;
@@ -90,23 +106,32 @@ function getTableCounts(
 
 function computeIndexCoverage(
   db: Database.Database,
+  projectId?: number,
 ): { coveragePct: number; lastIndexedAt: string | null } {
   try {
-    const indexed = (
-      db.prepare("SELECT COUNT(*) as cnt FROM file_index").get() as {
-        cnt: number;
-      }
-    ).cnt;
     const symbols = (
-      db.prepare("SELECT COUNT(*) as cnt FROM symbols").get() as {
-        cnt: number;
-      }
+      projectId !== undefined
+        ? (db
+            .prepare("SELECT COUNT(*) as cnt FROM symbols WHERE project_id = ?")
+            .get(projectId) as { cnt: number })
+        : (db.prepare("SELECT COUNT(*) as cnt FROM symbols").get() as {
+            cnt: number;
+          })
     ).cnt;
-    const lastIdx = db
-      .prepare("SELECT indexed_at FROM file_index ORDER BY indexed_at DESC LIMIT 1")
-      .get() as { indexed_at: string } | undefined;
+    const lastIdx = (
+      projectId !== undefined
+        ? db
+            .prepare(
+              "SELECT indexed_at FROM file_index WHERE project_id = ? ORDER BY indexed_at DESC LIMIT 1",
+            )
+            .get(projectId)
+        : db
+            .prepare(
+              "SELECT indexed_at FROM file_index ORDER BY indexed_at DESC LIMIT 1",
+            )
+            .get()
+    ) as { indexed_at: string } | undefined;
 
-    const coveragePct = indexed > 0 ? 100 : 0; // Full coverage if any files indexed
     return {
       coveragePct: symbols > 0 ? 100 : 0,
       lastIndexedAt: lastIdx?.indexed_at ?? null,
@@ -122,6 +147,7 @@ export function registerIntrospectionTools(
   server: McpServer,
   db: Database.Database,
   workspaceRoot: string,
+  project: ProjectIdentity,
 ): void {
   // ── cogmemory_status ──
   server.registerTool(
@@ -142,19 +168,27 @@ export function registerIntrospectionTools(
       }) as number;
 
       const dbPath = db.name;
-      const scope: string =
-        dbPath.includes("global.db") ? "global" : "workspace";
+      const scope: string = dbPath.includes("global.db")
+        ? "global"
+        : "workspace";
 
-      const { coveragePct, lastIndexedAt } = computeIndexCoverage(db);
+      const { coveragePct, lastIndexedAt } = computeIndexCoverage(
+        db,
+        project.projectId,
+      );
       const symbolCount = (
-        db.prepare("SELECT COUNT(*) as cnt FROM symbols").get() as {
-          cnt: number;
-        }
+        db
+          .prepare(
+            `SELECT COUNT(*) as cnt FROM symbols WHERE ${projectPredicate()}`,
+          )
+          .get(project.projectId) as { cnt: number }
       ).cnt;
       const edgeCount = (
-        db.prepare("SELECT COUNT(*) as cnt FROM edges").get() as {
-          cnt: number;
-        }
+        db
+          .prepare(
+            `SELECT COUNT(*) as cnt FROM edges WHERE ${projectPredicate()}`,
+          )
+          .get(project.projectId) as { cnt: number }
       ).cnt;
 
       const result: Record<string, unknown> = {
@@ -165,6 +199,12 @@ export function registerIntrospectionTools(
         scope,
         node_version: process.version,
         update_check_enabled: !isUpdateCheckDisabled(workspaceRoot),
+        active_project: {
+          id: project.projectId,
+          slug: project.slug,
+          label: project.label,
+          is_new_project: project.isNewProject,
+        },
         index: {
           total_symbols: symbolCount,
           total_edges: edgeCount,
@@ -174,7 +214,7 @@ export function registerIntrospectionTools(
       };
 
       if (verbose) {
-        result.counts = getTableCounts(db);
+        result.counts = getTableCounts(db, project.projectId);
       }
 
       return jsonOk(result);
@@ -210,10 +250,7 @@ export function registerIntrospectionTools(
           const parsed = JSON.parse(cached.value);
           const age = Date.now() - parsed.timestamp;
           if (age < CACHE_TTL_MS) {
-            const updateAvailable = compareVersions(
-              parsed.latest,
-              VERSION,
-            );
+            const updateAvailable = compareVersions(parsed.latest, VERSION);
             return jsonOk({
               current_version: VERSION,
               latest_version: parsed.latest,
@@ -257,10 +294,7 @@ export function registerIntrospectionTools(
             `INSERT INTO context (key, value, updated_at)
              VALUES (?, ?, datetime('now'))
              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
-          ).run(
-            CACHE_KEY,
-            JSON.stringify({ latest, timestamp: Date.now() }),
-          );
+          ).run(CACHE_KEY, JSON.stringify({ latest, timestamp: Date.now() }));
         } catch {
           // Cache write failure — non-fatal
         }
@@ -279,7 +313,8 @@ export function registerIntrospectionTools(
           latest_version: null,
           update_available: null,
           error: err instanceof Error ? err.message : "network error",
-          message: "Could not reach npm registry. Check your network connection.",
+          message:
+            "Could not reach npm registry. Check your network connection.",
         });
       }
     }),

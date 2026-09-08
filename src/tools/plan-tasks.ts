@@ -3,7 +3,12 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler, resolveSessionId, resolvePlanId } from "./utils.js";
+import {
+  wrapHandler,
+  resolveSessionId,
+  resolvePlanId,
+  projectPredicate,
+} from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -49,6 +54,7 @@ export const UpdateTaskStatusSchema = z.object({
 export function registerPlanTasksTools(
   server: McpServer,
   db: Database.Database,
+  projectId: number,
 ): void {
   // ── add_plan_item ──
   server.registerTool(
@@ -61,10 +67,11 @@ export function registerPlanTasksTools(
       "add_plan_item",
       async ({ phase, title, description, status, order_index }) => {
         const stmt = db.prepare(`
-        INSERT INTO plan (phase, title, description, status, order_index)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO plan (project_id, phase, title, description, status, order_index)
+        VALUES (?, ?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
+          projectId,
           phase ?? null,
           title,
           description ?? null,
@@ -97,9 +104,9 @@ export function registerPlanTasksTools(
     wrapHandler("update_plan_status", async ({ id, status }) => {
       const stmt = db.prepare(`
         UPDATE plan SET status = ?, updated_at = datetime('now')
-        WHERE id = ?
+        WHERE id = ? AND ${projectPredicate()}
       `);
-      const result = stmt.run(status, id);
+      const result = stmt.run(status, id, projectId);
       if (result.changes === 0) {
         return {
           content: [
@@ -139,10 +146,11 @@ export function registerPlanTasksTools(
       "create_task",
       async ({ plan_id, session_id, title, description, status, tags }) => {
         const stmt = db.prepare(`
-        INSERT INTO tasks (plan_id, session_id, title, description, status, tags)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO tasks (project_id, plan_id, session_id, title, description, status, tags)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
+          projectId,
           resolvePlanId(db, plan_id),
           resolveSessionId(db, session_id),
           title,
@@ -176,9 +184,9 @@ export function registerPlanTasksTools(
     wrapHandler("update_task_status", async ({ id, status }) => {
       const stmt = db.prepare(`
         UPDATE tasks SET status = ?, updated_at = datetime('now')
-        WHERE id = ?
+        WHERE id = ? AND ${projectPredicate()}
       `);
-      const result = stmt.run(status, id);
+      const result = stmt.run(status, id, projectId);
       if (result.changes === 0) {
         return {
           content: [

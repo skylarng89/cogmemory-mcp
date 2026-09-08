@@ -3,7 +3,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler } from "./utils.js";
+import { wrapHandler, projectPredicate } from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -48,6 +48,7 @@ export const UpdateSpecSchema = z.object({
 export function registerSpecsTools(
   server: McpServer,
   db: Database.Database,
+  projectId: number,
 ): void {
   // ── create_spec ──
   server.registerTool(
@@ -60,11 +61,13 @@ export function registerSpecsTools(
     wrapHandler(
       "create_spec",
       async ({ title, content, format, entity_id }) => {
-        // Validate entity_id if provided
+        // Validate entity_id if provided (and belongs to this project)
         if (entity_id !== undefined) {
           const entity = db
-            .prepare("SELECT id FROM entities WHERE id = ?")
-            .get(entity_id);
+            .prepare(
+              `SELECT id FROM entities WHERE id = ? AND ${projectPredicate()}`,
+            )
+            .get(entity_id, projectId);
           if (!entity) {
             return {
               content: [
@@ -81,10 +84,11 @@ export function registerSpecsTools(
         }
 
         const stmt = db.prepare(`
-        INSERT INTO specs (entity_id, title, content, format)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO specs (project_id, entity_id, title, content, format)
+        VALUES (?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
+          projectId,
           entity_id ?? null,
           title,
           content,
@@ -118,13 +122,15 @@ export function registerSpecsTools(
       let spec: Record<string, unknown> | undefined;
 
       if (id !== undefined) {
-        spec = db.prepare("SELECT * FROM specs WHERE id = ?").get(id) as
-          | Record<string, unknown>
-          | undefined;
+        spec = db
+          .prepare(`SELECT * FROM specs WHERE id = ? AND ${projectPredicate()}`)
+          .get(id, projectId) as Record<string, unknown> | undefined;
       } else if (title) {
-        spec = db.prepare("SELECT * FROM specs WHERE title = ?").get(title) as
-          | Record<string, unknown>
-          | undefined;
+        spec = db
+          .prepare(
+            `SELECT * FROM specs WHERE title = ? AND ${projectPredicate()}`,
+          )
+          .get(title, projectId) as Record<string, unknown> | undefined;
       }
 
       if (!spec) {
@@ -161,10 +167,10 @@ export function registerSpecsTools(
       inputSchema: UpdateSpecSchema,
     },
     wrapHandler("update_spec", async ({ id, content, title, entity_id }) => {
-      // Fetch current spec
-      const current = db.prepare("SELECT * FROM specs WHERE id = ?").get(id) as
-        | Record<string, unknown>
-        | undefined;
+      // Fetch current spec (scoped to the active project)
+      const current = db
+        .prepare(`SELECT * FROM specs WHERE id = ? AND ${projectPredicate()}`)
+        .get(id, projectId) as Record<string, unknown> | undefined;
 
       if (!current) {
         return {
@@ -180,11 +186,13 @@ export function registerSpecsTools(
         };
       }
 
-      // Validate entity_id if provided
+      // Validate entity_id if provided (and belongs to this project)
       if (entity_id !== undefined) {
         const entity = db
-          .prepare("SELECT id FROM entities WHERE id = ?")
-          .get(entity_id);
+          .prepare(
+            `SELECT id FROM entities WHERE id = ? AND ${projectPredicate()}`,
+          )
+          .get(entity_id, projectId);
         if (!entity) {
           return {
             content: [
@@ -209,11 +217,13 @@ export function registerSpecsTools(
         SET content = ?, title = ?, entity_id = ?,
             version = version + 1,
             updated_at = datetime('now')
-        WHERE id = ?
+        WHERE id = ? AND ${projectPredicate()}
       `);
-      stmt.run(newContent, newTitle, newEntityId, id);
+      stmt.run(newContent, newTitle, newEntityId, id, projectId);
 
-      const updated = db.prepare("SELECT * FROM specs WHERE id = ?").get(id);
+      const updated = db
+        .prepare(`SELECT * FROM specs WHERE id = ? AND ${projectPredicate()}`)
+        .get(id, projectId);
 
       return {
         content: [

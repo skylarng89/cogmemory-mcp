@@ -3,7 +3,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler, resolveSessionId } from "./utils.js";
+import { wrapHandler, resolveSessionId, projectPredicate } from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -95,6 +95,7 @@ interface RecallFilterOpts {
   since?: string;
   hasSession: boolean;
   hasTags: boolean;
+  projectId: number;
 }
 
 function ftsSearch(
@@ -120,6 +121,8 @@ function ftsSearch(
     conds.push(`${alias}.session_id = ?`);
     params.push(opts.session_id);
   }
+  conds.push(projectPredicate(alias));
+  params.push(opts.projectId);
 
   const sql = `
     SELECT ${alias}.* FROM recall_fts fts
@@ -154,6 +157,8 @@ function filteredQuery(
     conds.push("created_at >= ?");
     params.push(opts.since);
   }
+  conds.push(projectPredicate());
+  params.push(opts.projectId);
 
   const where = conds.length > 0 ? `WHERE ${conds.join(" AND ")}` : "";
   return db
@@ -168,6 +173,7 @@ function filteredQuery(
 export function registerMemoryTools(
   server: McpServer,
   db: Database.Database,
+  projectId: number,
 ): void {
   // ── remember_decision ──
   server.registerTool(
@@ -180,10 +186,11 @@ export function registerMemoryTools(
       "remember_decision",
       async ({ title, rationale, tags, session_id }) => {
         const stmt = db.prepare(`
-        INSERT INTO decisions (session_id, title, rationale, tags)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO decisions (project_id, session_id, title, rationale, tags)
+        VALUES (?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
+          projectId,
           resolveSessionId(db, session_id),
           title,
           rationale ?? null,
@@ -217,8 +224,8 @@ export function registerMemoryTools(
       "remember_convention",
       async ({ category, key, value, description, tags }) => {
         const stmt = db.prepare(`
-        INSERT INTO conventions (category, key, value, description, tags)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO conventions (project_id, category, key, value, description, tags)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(category, key) DO UPDATE SET
           value = excluded.value,
           description = excluded.description,
@@ -226,6 +233,7 @@ export function registerMemoryTools(
           updated_at = datetime('now')
       `);
         const result = stmt.run(
+          projectId,
           category,
           key,
           value ?? null,
@@ -266,10 +274,11 @@ export function registerMemoryTools(
         session_id,
       }) => {
         const stmt = db.prepare(`
-        INSERT INTO errors (session_id, error_signature, description, resolution, tags)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO errors (project_id, session_id, error_signature, description, resolution, tags)
+        VALUES (?, ?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
+          projectId,
           resolveSessionId(db, session_id),
           error_signature,
           description ?? null,
@@ -301,13 +310,14 @@ export function registerMemoryTools(
     },
     wrapHandler("set_active_context", async ({ key, value }) => {
       const stmt = db.prepare(`
-        INSERT INTO context (key, value, updated_at)
-        VALUES (?, ?, datetime('now'))
+        INSERT INTO context (project_id, key, value, updated_at)
+        VALUES (?, ?, ?, datetime('now'))
         ON CONFLICT(key) DO UPDATE SET
+          project_id = excluded.project_id,
           value = excluded.value,
           updated_at = datetime('now')
       `);
-      stmt.run(key, value ?? null);
+      stmt.run(projectId, key, value ?? null);
       return {
         content: [
           {
@@ -331,8 +341,10 @@ export function registerMemoryTools(
     },
     wrapHandler("get_active_context", async ({ key }) => {
       const row = db
-        .prepare("SELECT key, value, updated_at FROM context WHERE key = ?")
-        .get(key) as
+        .prepare(
+          `SELECT key, value, updated_at FROM context WHERE key = ? AND ${projectPredicate()}`,
+        )
+        .get(key, projectId) as
         | { key: string; value: string | null; updated_at: string }
         | undefined;
 
@@ -370,10 +382,15 @@ export function registerMemoryTools(
     },
     wrapHandler("log_change", async ({ summary, ref, session_id }) => {
       const stmt = db.prepare(`
-        INSERT INTO changelog (session_id, summary, ref)
-        VALUES (?, ?, ?)
+        INSERT INTO changelog (project_id, session_id, summary, ref)
+        VALUES (?, ?, ?, ?)
       `);
-      const result = stmt.run(resolveSessionId(db, session_id), summary, ref ?? null);
+      const result = stmt.run(
+        projectId,
+        resolveSessionId(db, session_id),
+        summary,
+        ref ?? null,
+      );
       return {
         content: [
           {
@@ -407,7 +424,14 @@ export function registerMemoryTools(
           "decisions",
           "d",
           text,
-          { tags, session_id, since, hasSession: true, hasTags: true },
+          {
+            tags,
+            session_id,
+            since,
+            hasSession: true,
+            hasTags: true,
+            projectId,
+          },
           lim,
         );
         results.conventions = ftsSearch(
@@ -415,7 +439,14 @@ export function registerMemoryTools(
           "conventions",
           "c",
           text,
-          { tags, session_id, since, hasSession: false, hasTags: true },
+          {
+            tags,
+            session_id,
+            since,
+            hasSession: false,
+            hasTags: true,
+            projectId,
+          },
           lim,
         );
         results.errors = ftsSearch(
@@ -423,7 +454,14 @@ export function registerMemoryTools(
           "errors",
           "e",
           text,
-          { tags, session_id, since, hasSession: true, hasTags: true },
+          {
+            tags,
+            session_id,
+            since,
+            hasSession: true,
+            hasTags: true,
+            projectId,
+          },
           lim,
         );
         results.changelog = ftsSearch(
@@ -431,33 +469,68 @@ export function registerMemoryTools(
           "changelog",
           "ch",
           text,
-          { tags, session_id, since, hasSession: true, hasTags: false },
+          {
+            tags,
+            session_id,
+            since,
+            hasSession: true,
+            hasTags: false,
+            projectId,
+          },
           lim,
         );
       } else {
         results.decisions = filteredQuery(
           db,
           "decisions",
-          { tags, session_id, since, hasSession: true, hasTags: true },
+          {
+            tags,
+            session_id,
+            since,
+            hasSession: true,
+            hasTags: true,
+            projectId,
+          },
           lim,
         );
         results.conventions = filteredQuery(
           db,
           "conventions",
-          { tags, session_id, since, hasSession: false, hasTags: true },
+          {
+            tags,
+            session_id,
+            since,
+            hasSession: false,
+            hasTags: true,
+            projectId,
+          },
           lim,
           "updated_at",
         );
         results.errors = filteredQuery(
           db,
           "errors",
-          { tags, session_id, since, hasSession: true, hasTags: true },
+          {
+            tags,
+            session_id,
+            since,
+            hasSession: true,
+            hasTags: true,
+            projectId,
+          },
           lim,
         );
         results.changelog = filteredQuery(
           db,
           "changelog",
-          { tags, session_id, since, hasSession: true, hasTags: false },
+          {
+            tags,
+            session_id,
+            since,
+            hasSession: true,
+            hasTags: false,
+            projectId,
+          },
           lim,
         );
       }

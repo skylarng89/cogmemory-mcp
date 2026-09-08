@@ -3,7 +3,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler } from "./utils.js";
+import { wrapHandler, projectPredicate } from "./utils.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -26,6 +26,7 @@ export const GetSessionSummarySchema = z.object({
 export function registerSessionTools(
   server: McpServer,
   db: Database.Database,
+  projectId: number,
 ): void {
   // ── start_session ──
   server.registerTool(
@@ -35,8 +36,8 @@ export function registerSessionTools(
       inputSchema: StartSessionSchema,
     },
     wrapHandler("start_session", async () => {
-      const stmt = db.prepare("INSERT INTO sessions DEFAULT VALUES");
-      const result = stmt.run();
+      const stmt = db.prepare("INSERT INTO sessions (project_id) VALUES (?)");
+      const result = stmt.run(projectId);
       return {
         content: [
           {
@@ -122,25 +123,27 @@ export function registerSessionTools(
 
       const decisions = db
         .prepare(
-          "SELECT * FROM decisions WHERE session_id = ? ORDER BY created_at",
+          `SELECT * FROM decisions WHERE session_id = ? AND ${projectPredicate()} ORDER BY created_at`,
         )
-        .all(id);
+        .all(id, projectId);
 
       const errors = db
         .prepare(
-          "SELECT * FROM errors WHERE session_id = ? ORDER BY created_at",
+          `SELECT * FROM errors WHERE session_id = ? AND ${projectPredicate()} ORDER BY created_at`,
         )
-        .all(id);
+        .all(id, projectId);
 
       const changelog = db
         .prepare(
-          "SELECT * FROM changelog WHERE session_id = ? ORDER BY created_at",
+          `SELECT * FROM changelog WHERE session_id = ? AND ${projectPredicate()} ORDER BY created_at`,
         )
-        .all(id);
+        .all(id, projectId);
 
       const tasks = db
-        .prepare("SELECT * FROM tasks WHERE session_id = ? ORDER BY created_at")
-        .all(id);
+        .prepare(
+          `SELECT * FROM tasks WHERE session_id = ? AND ${projectPredicate()} ORDER BY created_at`,
+        )
+        .all(id, projectId);
 
       return {
         content: [
