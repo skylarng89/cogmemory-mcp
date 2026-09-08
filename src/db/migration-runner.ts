@@ -9,7 +9,25 @@ import { readdirSync, readFileSync, copyFileSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 
 /** Maximum migration version this codebase supports. */
-const MAX_VERSION = 7;
+const MAX_VERSION = 8;
+
+/**
+ * Migrations that rewrite table structure in bulk and therefore always
+ * warrant a pre-migration backup, regardless of the starting user_version.
+ */
+const BACKUP_REQUIRED_VERSIONS = new Set([8]);
+
+/**
+ * Decide whether a pre-migration backup is needed: upgrading from
+ * user_version=0 (pre-migration-system), or applying a migration flagged
+ * as structurally risky (e.g. 008 project scoping).
+ */
+function shouldBackup(current: number, files: MigrationFile[]): boolean {
+  if (current === 0) return true;
+  return files.some(
+    (f) => BACKUP_REQUIRED_VERSIONS.has(f.version) && f.version > current,
+  );
+}
 
 /**
  * Run all pending migrations up to MAX_VERSION.
@@ -38,54 +56,87 @@ export function runMigrations(db: Database.Database, dbPath: string): void {
     return;
   }
 
-  // Pre-migration backup for user_version=0 (pre-migration-system) DBs
-  if (current === 0 && !process.env.COGMEMORY_SKIP_BACKUP) {
+  // Pre-migration backup (see shouldBackup)
+  if (
+    shouldBackup(current, migrationFiles) &&
+    !process.env.COGMEMORY_SKIP_BACKUP
+  ) {
     createBackup(dbPath);
   }
 
   // Apply pending migrations in order
-  for (const file of migrationFiles) {
-    const version = file.version;
-    if (version <= current) {
-      continue; // Already applied
-    }
-
-    const sql = readFileSync(file.path, "utf-8");
-    console.error(`  [migrate] Applying migration ${file.name} (v${version})…`);
-
-    try {
-      db.transaction(() => {
-        db.exec(sql);
-      })();
-    } catch (err) {
-      // Suppress: better-sqlite3 treats PRAGMA user_version as both a
-      // "write" and a "pragma" and may throw "not an error" on some
-      // SQLite builds. Check if migration actually succeeded.
-      const check = db.pragma("user_version", { simple: true }) as number;
-      if (check < version) {
-        // Real failure — exit so the user can recover from the backup
-        console.error(
-          `[migrate] CRITICAL: Migration ${file.name} failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        console.error(
-          `[migrate] Database may be partially migrated (user_version=${check}).`,
-        );
-        if (current === 0) {
-          console.error(
-            `[migrate] Recovery: restore from backup file: ${dbPath}.backup-pre-migrate-*`,
-          );
-        }
-        process.exit(1);
-      }
-      // If user_version advanced, the migration succeeded despite the
-      // warning. Continue.
-      console.error(`  [migrate] ${file.name} applied (ignoring pragma warning).`);
-    }
-  }
+  applyPendingMigrations(db, migrationFiles, current, dbPath);
 
   const finalVersion = db.pragma("user_version", { simple: true }) as number;
   if (finalVersion > current) {
-    console.error(`  [migrate] Schema upgraded: v${current} → v${finalVersion}`);
+    console.error(
+      `  [migrate] Schema upgraded: v${current} → v${finalVersion}`,
+    );
+  }
+}
+
+/**
+ * Apply all pending migrations (version > current) in order.
+ * Extracted from runMigrations to keep cognitive complexity low.
+ */
+function applyPendingMigrations(
+  db: Database.Database,
+  files: MigrationFile[],
+  current: number,
+  dbPath: string,
+): void {
+  for (const file of files) {
+    if (file.version <= current) {
+      continue; // Already applied
+    }
+    applySingleMigration(db, file, current, dbPath);
+  }
+}
+
+/**
+ * Apply one migration inside a transaction, with the pragma-warning
+ * tolerance and failure handling used by the original loop.
+ */
+function applySingleMigration(
+  db: Database.Database,
+  file: MigrationFile,
+  current: number,
+  dbPath: string,
+): void {
+  const sql = readFileSync(file.path, "utf-8");
+  console.error(
+    `  [migrate] Applying migration ${file.name} (v${file.version})…`,
+  );
+
+  try {
+    db.transaction(() => {
+      db.exec(sql);
+    })();
+  } catch (err) {
+    // Suppress: better-sqlite3 treats PRAGMA user_version as both a
+    // "write" and a "pragma" and may throw "not an error" on some
+    // SQLite builds. Check if migration actually succeeded.
+    const check = db.pragma("user_version", { simple: true }) as number;
+    if (check < file.version) {
+      // Real failure — exit so the user can recover from the backup
+      console.error(
+        `[migrate] CRITICAL: Migration ${file.name} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      console.error(
+        `[migrate] Database may be partially migrated (user_version=${check}).`,
+      );
+      if (current === 0) {
+        console.error(
+          `[migrate] Recovery: restore from backup file: ${dbPath}.backup-pre-migrate-*`,
+        );
+      }
+      process.exit(1);
+    }
+    // If user_version advanced, the migration succeeded despite the
+    // warning. Continue.
+    console.error(
+      `  [migrate] ${file.name} applied (ignoring pragma warning).`,
+    );
   }
 }
 
@@ -114,9 +165,9 @@ function discoverMigrations(dir: string): MigrationFile[] {
   for (const entry of entries) {
     if (!entry.endsWith(".sql")) continue;
     // Extract version from filename: 001_baseline.sql → 1
-    const match = entry.match(/^(\d{3})_/);
+    const match = /^\d{3}_/.exec(entry);
     if (!match) continue;
-    const version = parseInt(match[1], 10);
+    const version = Number.parseInt(match[0].slice(0, 3), 10);
     const path = join(dir, entry);
     try {
       // Verify it's a regular file, not a directory
@@ -143,9 +194,7 @@ function createBackup(dbPath: string): void {
     // Use SQLite backup API via better-sqlite3 (cleaner than fs.copyFileSync
     // while WAL mode is active — this ensures a consistent snapshot)
     copyFileSync(dbPath, backupPath);
-    console.error(
-      `  [migrate] Backup created: ${backupPath}`,
-    );
+    console.error(`  [migrate] Backup created: ${backupPath}`);
   } catch (err) {
     console.error(
       `[migrate] WARNING: Could not create backup at ${backupPath}: ${err instanceof Error ? err.message : String(err)}`,

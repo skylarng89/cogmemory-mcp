@@ -233,6 +233,34 @@ CogMemory resolves scope in priority order:
 
 ---
 
+## Project Identity
+
+Every project gets a **stable, opaque slug** (UUID) stored in `.cogmemory/config.json` under `project_id`. This slug — not the folder path or name — is the project's identity. All memories (decisions, conventions, errors, sessions, code graph, etc.) are stamped with a `project_id` foreign key, so:
+
+- **Renames and moves are safe.** Moving a project folder does not sever access to its memories — the slug travels with the config file, and the path is metadata only.
+- **Fixed-path configs work.** IDEs/clients that cannot expand `${workspaceFolder}` can point at a single shared database path; each project's memories remain isolated by slug.
+- **Global scope is multi-project safe.** `~/.cogmemory/global.db` can hold many projects, with every read/write implicitly scoped to the active project's slug.
+
+### `.cogmemory/config.json` & Git
+
+`.cogmemory/config.json` is **gitignored by default** — each clone gets its own identity on first run. If you _want_ team-shared memory across all clones, commit the file intentionally. CogMemory logs a first-run advisory reminding you of this.
+
+### Project Management Tools
+
+| Tool             | Purpose                                                               |
+| ---------------- | --------------------------------------------------------------------- |
+| `list_projects`  | All projects with row counts, last-seen timestamps, staleness flags   |
+| `rename_project` | Change a project's display label (slug is immutable)                  |
+| `prune_projects` | Permanently delete a project and all of its rows (requires `confirm`) |
+
+`cogmemory_status` reports `active_project: { id, slug, label }`, and in verbose mode shows per-table counts scoped to the active project.
+
+### Multi-Root / Monorepos
+
+Nearest-ancestor `.cogmemory/` wins when walking up from CWD. In monorepos, pin the intended root explicitly with `--workspace <path>` or `COGMEMORY_WORKSPACE` to avoid silently attaching to the wrong project.
+
+---
+
 ## Workspace Resolution & Multi-Root Support
 
 CogMemory resolves the workspace root (where `.cogmemory/memory.db` lives) in this priority order:

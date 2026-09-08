@@ -378,71 +378,115 @@ function analyzeAndInsert(
 
   db.transaction(() => {
     for (const sym of result.symbols) {
-      // Extract source code for body_hash / tokenization
-      const lines = getFileLines(sym.file_path);
-      const startLine = sym.start_line ?? 1;
-      const endLine = sym.end_line ?? lines.length;
-      const bodyText = lines.slice(startLine - 1, endLine).join("\n");
-
-      const isExported = sym.is_exported ? 1 : 0;
-      const bodyHash = bodyText.length > 0 ? computeBodyHash(bodyText) : null;
-      const tokens = bodyText.length > 0 ? tokenizeSymbolBody(bodyText) : [];
-      const tokenCount = tokens.length;
-
-      let symbolId: number;
-      if (hasExported && hasBodyHash && hasTokenCount) {
-        const r = insertSymbol.run(
-          projectId,
-          sym.file_path,
-          sym.symbol_name,
-          sym.symbol_type,
-          sym.start_line,
-          sym.end_line,
-          isExported,
-          bodyHash,
-          tokenCount,
-        );
-        symbolId = r.lastInsertRowid as number;
-      } else {
-        const r = insertSymbol.run(
-          projectId,
-          sym.file_path,
-          sym.symbol_name,
-          sym.symbol_type,
-          sym.start_line,
-          sym.end_line,
-        );
-        symbolId = r.lastInsertRowid as number;
-      }
-
-      symbolIdMap.set(
-        `${sym.file_path}:${sym.symbol_name}:${sym.start_line}`,
-        symbolId,
+      insertAnalyzedSymbol(
+        db,
+        insertSymbol,
+        symbolIdMap,
+        sym,
+        getFileLines,
+        { hasFullColumns: hasExported && hasBodyHash && hasTokenCount, hasTokensTable },
+        projectId,
       );
-
-      // Populate symbol_tokens for TF-IDF
-      if (insertToken && tokenCount > 0) {
-        // Compute term frequency
-        const termFreq = new Map<string, number>();
-        for (const token of tokens) {
-          termFreq.set(token, (termFreq.get(token) ?? 0) + 1);
-        }
-        // Normalize TF
-        for (const [token, count] of termFreq) {
-          const tf = count / tokenCount;
-          insertToken.run(symbolId, token, tf);
-        }
-      }
     }
   })();
 
+  const newEdgeCount = insertResolvedEdges(db, result.edges, symbolIdMap, projectId);
+
+  return { newSymbolCount: result.symbols.length, newEdgeCount };
+}
+
+/** Schema capability flags for the symbols table. */
+interface SymbolColumnFlags {
+  hasFullColumns: boolean;
+  hasTokensTable: boolean;
+}
+
+/** Insert one analyzed symbol (plus its TF-IDF tokens) and register its ID. */
+function insertAnalyzedSymbol(
+  db: Database.Database,
+  insertSymbol: Database.Statement,
+  symbolIdMap: Map<string, number>,
+  sym: { file_path: string; symbol_name: string; symbol_type: string; start_line: number | null; end_line: number | null; is_exported?: boolean },
+  getFileLines: (filePath: string) => string[],
+  flags: SymbolColumnFlags,
+  projectId: number,
+): void {
+  const insertToken = flags.hasTokensTable
+    ? db.prepare(
+        "INSERT OR IGNORE INTO symbol_tokens (symbol_id, token, tf) VALUES (?, ?, ?)",
+      )
+    : null;
+  // Extract source code for body_hash / tokenization
+  const lines = getFileLines(sym.file_path);
+  const startLine = sym.start_line ?? 1;
+  const endLine = sym.end_line ?? lines.length;
+  const bodyText = lines.slice(startLine - 1, endLine).join("\n");
+
+  const isExported = sym.is_exported ? 1 : 0;
+  const bodyHash = bodyText.length > 0 ? computeBodyHash(bodyText) : null;
+  const tokens = bodyText.length > 0 ? tokenizeSymbolBody(bodyText) : [];
+  const tokenCount = tokens.length;
+
+  let symbolId: number;
+  if (flags.hasFullColumns) {
+    const r = insertSymbol.run(
+      projectId,
+      sym.file_path,
+      sym.symbol_name,
+      sym.symbol_type,
+      sym.start_line,
+      sym.end_line,
+      isExported,
+      bodyHash,
+      tokenCount,
+    );
+    symbolId = r.lastInsertRowid as number;
+  } else {
+    const r = insertSymbol.run(
+      projectId,
+      sym.file_path,
+      sym.symbol_name,
+      sym.symbol_type,
+      sym.start_line,
+      sym.end_line,
+    );
+    symbolId = r.lastInsertRowid as number;
+  }
+
+  symbolIdMap.set(
+    `${sym.file_path}:${sym.symbol_name}:${sym.start_line}`,
+    symbolId,
+  );
+
+  // Populate symbol_tokens for TF-IDF
+  if (insertToken && tokenCount > 0) {
+    // Compute term frequency
+    const termFreq = new Map<string, number>();
+    for (const token of tokens) {
+      termFreq.set(token, (termFreq.get(token) ?? 0) + 1);
+    }
+    // Normalize TF
+    for (const [token, count] of termFreq) {
+      const tf = count / tokenCount;
+      insertToken.run(symbolId, token, tf);
+    }
+  }
+}
+
+/** Resolve and insert structural edges; returns the count inserted. */
+function insertResolvedEdges(
+  db: Database.Database,
+  edges: Array<{ from_file: string; from_name: string; from_start_line: number | null; to_file: string; to_name: string; to_start_line: number | null; edge_type: string }>,
+  symbolIdMap: Map<string, number>,
+  projectId: number,
+): number {
   let newEdgeCount = 0;
   const insertEdge = db.prepare(`
     INSERT INTO edges (project_id, from_symbol_id, to_symbol_id, edge_type)
     VALUES (?, ?, ?, ?)
   `);
   db.transaction(() => {
-    for (const edge of result.edges) {
+    for (const edge of edges) {
       const fromId = resolveSymbolId(
         symbolIdMap,
         edge.from_file,
@@ -465,8 +509,7 @@ function analyzeAndInsert(
       }
     }
   })();
-
-  return { newSymbolCount: result.symbols.length, newEdgeCount };
+  return newEdgeCount;
 }
 
 /**

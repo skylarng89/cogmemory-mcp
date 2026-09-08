@@ -767,59 +767,13 @@ export function registerCodeAnalysisTools(
       const includeTests = params.include_tests === true;
 
       // Detect changed files
-      let changedFiles: string[];
-      if (params.changed_files) {
-        changedFiles = params.changed_files;
-      } else {
-        try {
-          const diffOutput = execSync("git diff --name-only HEAD", {
-            cwd: workspaceRoot,
-            encoding: "utf-8",
-            timeout: 10000,
-          }).trim();
-          // Also get untracked files
-          let untracked = "";
-          try {
-            untracked = execSync("git ls-files --others --exclude-standard", {
-              cwd: workspaceRoot,
-              encoding: "utf-8",
-              timeout: 10000,
-            }).trim();
-          } catch {
-            /* ok */
-          }
-
-          const allChanges = [diffOutput, untracked]
-            .filter(Boolean)
-            .join("\n")
-            .split("\n")
-            .filter(Boolean);
-
-          if (allChanges.length === 0) {
-            return jsonOk({
-              message:
-                "No uncommitted changes detected (git diff returned empty). Pass changed_files manually.",
-              changed_files: [],
-              changed_symbols: [],
-              impacted_symbols: [],
-              summary: { total_impacted: 0 },
-            });
-          }
-          changedFiles = allChanges;
-        } catch (err) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  success: false,
-                  message: `git diff failed — workspace may not be a git repository. Pass changed_files manually. Error: ${err instanceof Error ? err.message : String(err)}`,
-                }),
-              },
-            ],
-          };
-        }
+      const detected = params.changed_files
+        ? { ok: true as const, files: params.changed_files }
+        : detectGitChanges(workspaceRoot);
+      if (!detected.ok) {
+        return detected.response;
       }
+      const changedFiles = detected.files;
 
       // Map changed files to symbols
       if (changedFiles.length === 0) {
@@ -891,27 +845,7 @@ export function registerCodeAnalysisTools(
       >[];
 
       // Enrich with path info
-      const impactWithPaths: Record<string, unknown>[] = [];
-      for (const imp of impacted) {
-        // Fetch the shortest caller chain (1-hop detail)
-        const chain = db
-          .prepare(
-            `
-          SELECT e.from_symbol_id, s2.symbol_name as caller_name
-          FROM edges e
-          JOIN symbols s2 ON s2.id = e.from_symbol_id
-          WHERE e.to_symbol_id = ?
-            AND e.edge_type IN (${typePlaceholders})
-          LIMIT 3
-        `,
-          )
-          .all(imp.id, ...types) as Record<string, unknown>[];
-
-        impactWithPaths.push({
-          ...imp,
-          callers: chain.map((c) => c.caller_name),
-        });
-      }
+      const impactWithPaths = enrichWithCallerChains(db, impacted, types);
 
       return jsonOk({
         changed_files: changedFiles,
@@ -965,82 +899,24 @@ export function registerCodeAnalysisTools(
       const fileArgs = params.file_pattern ? [`%${params.file_pattern}%`] : [];
 
       // Step 1: Exact clones via body_hash
-      let exactCloneCount = 0;
-      if (hasBodyHash && hasMetadata) {
-        const exactSql = `
-          SELECT s1.id as id_a, s2.id as id_b, s1.body_hash
-          FROM symbols s1
-          JOIN symbols s2 ON s1.body_hash = s2.body_hash AND s1.id < s2.id
-          WHERE s1.body_hash IS NOT NULL AND s1.body_hash != ''
-            ${fileFilter}
-          LIMIT 1000
-        `;
-        const exactPairs = db.prepare(exactSql).all(projectId, ...fileArgs) as {
-          id_a: number;
-          id_b: number;
-          body_hash: string;
-        }[];
-        const insertEdge = db.prepare(`
-          INSERT OR IGNORE INTO edges (project_id, from_symbol_id, to_symbol_id, edge_type, metadata)
-          VALUES (?, ?, ?, ?, ?)
-        `);
-        for (const pair of exactPairs) {
-          insertEdge.run(
-            projectId,
-            pair.id_a,
-            pair.id_b,
-            EDGE_TYPES.SIMILAR_TO,
-            JSON.stringify({ score: 1.0, algorithm: "exact" }),
-          );
-          exactCloneCount++;
-        }
-      }
+      const exactCloneCount =
+        hasBodyHash && hasMetadata
+          ? insertExactClones(db, projectId, fileFilter, fileArgs)
+          : 0;
 
       // Step 2: Near-duplicates via MinHash
       let nearDupeCount = 0;
       let signaturesSource = "not_available";
 
       if (recompute && hasMinhash) {
-        // Recompute signatures
-        const symbols = db
-          .prepare(
-            `SELECT s.* FROM symbols s WHERE s.symbol_type != 'file' AND s.project_id = ? AND s.token_count >= ? ${fileFilter} ORDER BY s.file_path`,
-          )
-          .all(projectId, minTokens, ...fileArgs) as Record<string, unknown>[];
-
-        const upsertMinhash = db.prepare(`
-          INSERT INTO symbol_minhash (symbol_id, signature, num_hashes, shingle_k, computed_at)
-          VALUES (?, ?, ?, ?, datetime('now'))
-          ON CONFLICT(symbol_id) DO UPDATE SET signature = excluded.signature, num_hashes = excluded.num_hashes, shingle_k = excluded.shingle_k, computed_at = datetime('now')
-        `);
-
-        const allSigs: Map<number, number[]> = new Map();
-        db.transaction(() => {
-          for (const sym of symbols) {
-            const filePath = sym.file_path as string;
-            const absPath = resolve(workspaceRoot, filePath);
-            if (!existsSync(absPath)) continue;
-            try {
-              const lines = readFileSync(absPath, "utf-8").split("\n");
-              const startLine = (sym.start_line as number) ?? 1;
-              const endLine = (sym.end_line as number) ?? lines.length;
-              const bodyText = lines.slice(startLine - 1, endLine).join(" ");
-              const tokens = tokenize(bodyText);
-              if (tokens.length < minTokens) continue;
-              const shingles = shingle(tokens, MINHASH_SHINGLE_K);
-              const sig = computeMinHash(shingles, MINHASH_NUM_HASHES);
-              allSigs.set(sym.id as number, sig);
-              upsertMinhash.run(
-                sym.id as number,
-                JSON.stringify(sig),
-                MINHASH_NUM_HASHES,
-                MINHASH_SHINGLE_K,
-              );
-            } catch {
-              /* file read error — skip */
-            }
-          }
-        })();
+        const allSigs = recomputeMinhashSignatures(
+          db,
+          workspaceRoot,
+          projectId,
+          minTokens,
+          fileFilter,
+          fileArgs,
+        );
 
         nearDupeCount = computeNearDuplicates(
           db,
@@ -1051,20 +927,7 @@ export function registerCodeAnalysisTools(
         );
         signaturesSource = "recomputed";
       } else if (hasMinhash) {
-        // Use stored signatures (only for symbols in the active project)
-        const stored = db
-          .prepare(
-            "SELECT m.symbol_id, m.signature FROM symbol_minhash m JOIN symbols s ON s.id = m.symbol_id WHERE s.project_id = ?",
-          )
-          .all(projectId) as { symbol_id: number; signature: string }[];
-        const allSigs = new Map<number, number[]>();
-        for (const row of stored) {
-          try {
-            allSigs.set(row.symbol_id, JSON.parse(row.signature));
-          } catch {
-            /* corrupt signature */
-          }
-        }
+        const allSigs = loadStoredSignatures(db, projectId);
 
         nearDupeCount = computeNearDuplicates(
           db,
@@ -1505,6 +1368,211 @@ export function registerCodeAnalysisTools(
       });
     }),
   );
+}
+
+// ─── Helper: detect uncommitted git changes ─────────────
+
+type GitChangeResult =
+  | { ok: true; files: string[] }
+  | { ok: false; response: ReturnType<typeof jsonOk> };
+
+/**
+ * Detect changed files via `git diff` + untracked files.
+ * Returns an error response if the workspace is not a git repository.
+ */
+function detectGitChanges(workspaceRoot: string): GitChangeResult {
+  try {
+    const diffOutput = execSync("git diff --name-only HEAD", {
+      cwd: workspaceRoot,
+      encoding: "utf-8",
+      timeout: 10000,
+    }).trim(); // NOSONAR: fixed command string, cwd is the workspace root
+    // Also get untracked files
+    let untracked = "";
+    try {
+      untracked = execSync("git ls-files --others --exclude-standard", {
+        cwd: workspaceRoot,
+        encoding: "utf-8",
+        timeout: 10000,
+      }).trim(); // NOSONAR: fixed command string, cwd is the workspace root
+    } catch {
+      /* ok */
+    }
+
+    const allChanges = [diffOutput, untracked]
+      .filter(Boolean)
+      .join("\n")
+      .split("\n")
+      .filter(Boolean);
+
+    if (allChanges.length === 0) {
+      return {
+        ok: true,
+        files: [],
+      };
+    }
+    return { ok: true, files: allChanges };
+  } catch (err) {
+    return {
+      ok: false,
+      response: {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              success: false,
+              message: `git diff failed — workspace may not be a git repository. Pass changed_files manually. Error: ${err instanceof Error ? err.message : String(err)}`,
+            }),
+          },
+        ],
+      },
+    };
+  }
+}
+
+// ─── Helper: enrich impacted symbols with caller chains ──
+
+function enrichWithCallerChains(
+  db: Database.Database,
+  impacted: Record<string, unknown>[],
+  types: string[],
+): Record<string, unknown>[] {
+  const typePlaceholders = types.map(() => "?").join(",");
+  const result: Record<string, unknown>[] = [];
+  for (const imp of impacted) {
+    // Fetch the shortest caller chain (1-hop detail)
+    const chain = db
+      .prepare(
+        `
+          SELECT e.from_symbol_id, s2.symbol_name as caller_name
+          FROM edges e
+          JOIN symbols s2 ON s2.id = e.from_symbol_id
+          WHERE e.to_symbol_id = ?
+            AND e.edge_type IN (${typePlaceholders})
+          LIMIT 3
+        `,
+      )
+      .all(imp.id, ...types) as Record<string, unknown>[];
+
+    result.push({
+      ...imp,
+      callers: chain.map((c) => c.caller_name),
+    });
+  }
+  return result;
+}
+
+// ─── Helper: exact clones via body_hash ─────────────────
+
+function insertExactClones(
+  db: Database.Database,
+  projectId: number,
+  fileFilter: string,
+  fileArgs: string[],
+): number {
+  const exactSql = `
+          SELECT s1.id as id_a, s2.id as id_b, s1.body_hash
+          FROM symbols s1
+          JOIN symbols s2 ON s1.body_hash = s2.body_hash AND s1.id < s2.id
+          WHERE s1.body_hash IS NOT NULL AND s1.body_hash != ''
+            ${fileFilter}
+          LIMIT 1000
+        `;
+  const exactPairs = db.prepare(exactSql).all(projectId, ...fileArgs) as {
+    id_a: number;
+    id_b: number;
+    body_hash: string;
+  }[];
+  const insertEdge = db.prepare(`
+          INSERT OR IGNORE INTO edges (project_id, from_symbol_id, to_symbol_id, edge_type, metadata)
+          VALUES (?, ?, ?, ?, ?)
+        `);
+  let count = 0;
+  for (const pair of exactPairs) {
+    insertEdge.run(
+      projectId,
+      pair.id_a,
+      pair.id_b,
+      EDGE_TYPES.SIMILAR_TO,
+      JSON.stringify({ score: 1.0, algorithm: "exact" }),
+    );
+    count++;
+  }
+  return count;
+}
+
+// ─── Helper: recompute MinHash signatures from source files ──
+
+function recomputeMinhashSignatures(
+  db: Database.Database,
+  workspaceRoot: string,
+  projectId: number,
+  minTokens: number,
+  fileFilter: string,
+  fileArgs: string[],
+): Map<number, number[]> {
+  const symbols = db
+    .prepare(
+      `SELECT s.* FROM symbols s WHERE s.symbol_type != 'file' AND s.project_id = ? AND s.token_count >= ? ${fileFilter} ORDER BY s.file_path`,
+    )
+    .all(projectId, minTokens, ...fileArgs) as Record<string, unknown>[];
+
+  const upsertMinhash = db.prepare(`
+          INSERT INTO symbol_minhash (symbol_id, signature, num_hashes, shingle_k, computed_at)
+          VALUES (?, ?, ?, ?, datetime('now'))
+          ON CONFLICT(symbol_id) DO UPDATE SET signature = excluded.signature, num_hashes = excluded.num_hashes, shingle_k = excluded.shingle_k, computed_at = datetime('now')
+        `);
+
+  const allSigs: Map<number, number[]> = new Map();
+  db.transaction(() => {
+    for (const sym of symbols) {
+      const filePath = sym.file_path as string;
+      const absPath = resolve(workspaceRoot, filePath);
+      if (!existsSync(absPath)) continue;
+      try {
+        const lines = readFileSync(absPath, "utf-8").split("\n");
+        const startLine = (sym.start_line as number) ?? 1;
+        const endLine = (sym.end_line as number) ?? lines.length;
+        const bodyText = lines.slice(startLine - 1, endLine).join(" ");
+        const tokens = tokenize(bodyText);
+        if (tokens.length < minTokens) continue;
+        const shingles = shingle(tokens, MINHASH_SHINGLE_K);
+        const sig = computeMinHash(shingles, MINHASH_NUM_HASHES);
+        allSigs.set(sym.id as number, sig);
+        upsertMinhash.run(
+          sym.id as number,
+          JSON.stringify(sig),
+          MINHASH_NUM_HASHES,
+          MINHASH_SHINGLE_K,
+        );
+      } catch {
+        /* file read error — skip */
+      }
+    }
+  })();
+  return allSigs;
+}
+
+// ─── Helper: load stored MinHash signatures for a project ──
+
+function loadStoredSignatures(
+  db: Database.Database,
+  projectId: number,
+): Map<number, number[]> {
+  const stored = db
+    .prepare(
+      "SELECT m.symbol_id, m.signature FROM symbol_minhash m JOIN symbols s ON s.id = m.symbol_id WHERE s.project_id = ?",
+    )
+    .all(projectId) as { symbol_id: number; signature: string }[];
+  const allSigs = new Map<number, number[]>();
+  for (const row of stored) {
+    try {
+      allSigs.set(row.symbol_id, JSON.parse(row.signature));
+    } catch {
+      /* corrupt signature */
+    }
+  }
+  return allSigs;
 }
 
 // ─── Helper: compute near-duplicate pairs from MinHash signatures ─────
