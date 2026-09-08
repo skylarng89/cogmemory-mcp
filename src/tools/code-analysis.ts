@@ -10,7 +10,7 @@ import { walkFilesWithMtime } from "../indexing/walker.js";
 import { EDGE_TYPES, STRUCTURAL_EDGE_TYPES } from "../indexing/edge-types.js";
 import { readFileSync, existsSync } from "node:fs";
 import { extname, resolve } from "node:path";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 // ─── Stopwords / language keywords for tokenization ─────
 
@@ -1372,6 +1372,37 @@ export function registerCodeAnalysisTools(
 
 // ─── Helper: detect uncommitted git changes ─────────────
 
+/**
+ * Resolve the git executable to a fixed absolute path (S4036 compliant
+ * solution: never rely on PATH lookup for the spawned binary).
+ *
+ * Candidates are checked in order; the first existing file wins. If none
+ * exist, we fall back to the bare name (PATH lookup) so the tool still
+ * works in unusual environments — the S4036 finding is then unavoidable
+ * but the behavior is unchanged.
+ */
+function resolveGitBinary(): string {
+  const candidates =
+    process.platform === "win32"
+      ? [
+          String.raw`C:\Program Files\Git\cmd\git.exe`,
+          String.raw`C:\Program Files (x86)\Git\cmd\git.exe`,
+        ]
+      : ["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"];
+
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) return candidate;
+    } catch {
+      // Ignore probe errors and continue
+    }
+  }
+  return "git";
+}
+
+/** Fixed absolute path to the git binary, resolved once at module load. */
+const GIT_BINARY = resolveGitBinary();
+
 type GitChangeResult =
   | { ok: true; files: string[] }
   | { ok: false; response: ReturnType<typeof jsonOk> };
@@ -1382,19 +1413,30 @@ type GitChangeResult =
  */
 function detectGitChanges(workspaceRoot: string): GitChangeResult {
   try {
-    const diffOutput = execSync("git diff --name-only HEAD", {
-      cwd: workspaceRoot,
-      encoding: "utf-8",
-      timeout: 10000,
-    }).trim(); // NOSONAR: fixed command string, cwd is the workspace root
-    // Also get untracked files
-    let untracked = "";
-    try {
-      untracked = execSync("git ls-files --others --exclude-standard", {
+    // execFileSync with an argument array avoids spawning a shell — the
+    // command is the fixed git binary (absolute path) and cwd is the
+    // workspace root.
+    const diffOutput = execFileSync(
+      GIT_BINARY,
+      ["diff", "--name-only", "HEAD"],
+      {
         cwd: workspaceRoot,
         encoding: "utf-8",
         timeout: 10000,
-      }).trim(); // NOSONAR: fixed command string, cwd is the workspace root
+      },
+    ).trim();
+    // Also get untracked files
+    let untracked = "";
+    try {
+      untracked = execFileSync(
+        GIT_BINARY,
+        ["ls-files", "--others", "--exclude-standard"],
+        {
+          cwd: workspaceRoot,
+          encoding: "utf-8",
+          timeout: 10000,
+        },
+      ).trim();
     } catch {
       /* ok */
     }
