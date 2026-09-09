@@ -9,13 +9,21 @@ import { readdirSync, readFileSync, copyFileSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 
 /** Maximum migration version this codebase supports. */
-const MAX_VERSION = 8;
+const MAX_VERSION = 9;
 
 /**
  * Migrations that rewrite table structure in bulk and therefore always
  * warrant a pre-migration backup, regardless of the starting user_version.
  */
-const BACKUP_REQUIRED_VERSIONS = new Set([8]);
+const BACKUP_REQUIRED_VERSIONS = new Set([8, 9]);
+
+/**
+ * Migrations that DROP and rebuild tables referenced by ON DELETE CASCADE
+ * foreign keys (e.g. `entities`, `symbols`). Foreign keys MUST be disabled
+ * for the duration of these migrations, otherwise the DROP TABLE cascades
+ * into dependent tables and wipes their rows.
+ */
+const FOREIGN_KEYS_OFF_VERSIONS = new Set([9]);
 
 /**
  * Decide whether a pre-migration backup is needed: upgrading from
@@ -108,6 +116,13 @@ function applySingleMigration(
     `  [migrate] Applying migration ${file.name} (v${file.version})…`,
   );
 
+  // Disable foreign keys for table-rebuild migrations so DROP TABLE does not
+  // cascade into dependent tables. Re-enabled after the transaction commits.
+  const disableForeignKeys = FOREIGN_KEYS_OFF_VERSIONS.has(file.version);
+  if (disableForeignKeys) {
+    db.pragma("foreign_keys = OFF");
+  }
+
   try {
     db.transaction(() => {
       db.exec(sql);
@@ -137,6 +152,12 @@ function applySingleMigration(
     console.error(
       `  [migrate] ${file.name} applied (ignoring pragma warning).`,
     );
+  } finally {
+    // Restore foreign keys after a table-rebuild migration, regardless of
+    // success or failure (the connection is shared and reused on every open).
+    if (disableForeignKeys) {
+      db.pragma("foreign_keys = ON");
+    }
   }
 }
 

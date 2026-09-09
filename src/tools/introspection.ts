@@ -243,8 +243,8 @@ export function registerIntrospectionTools(
       // Check cache
       try {
         const cached = db
-          .prepare("SELECT value FROM context WHERE key = ?")
-          .get(CACHE_KEY) as { value: string } | undefined;
+          .prepare("SELECT value FROM context WHERE key = ? AND project_id = ?")
+          .get(CACHE_KEY, project.projectId) as { value: string } | undefined;
 
         if (cached) {
           const parsed = JSON.parse(cached.value);
@@ -291,10 +291,14 @@ export function registerIntrospectionTools(
         // Cache the result
         try {
           db.prepare(
-            `INSERT INTO context (key, value, updated_at)
-             VALUES (?, ?, datetime('now'))
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
-          ).run(CACHE_KEY, JSON.stringify({ latest, timestamp: Date.now() }));
+            `INSERT INTO context (project_id, key, value, updated_at)
+             VALUES (?, ?, ?, datetime('now'))
+             ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+          ).run(
+            project.projectId,
+            CACHE_KEY,
+            JSON.stringify({ latest, timestamp: Date.now() }),
+          );
         } catch {
           // Cache write failure — non-fatal
         }

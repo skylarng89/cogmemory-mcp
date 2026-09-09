@@ -226,7 +226,7 @@ export function registerMemoryTools(
         const stmt = db.prepare(`
         INSERT INTO conventions (project_id, category, key, value, description, tags)
         VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(category, key) DO UPDATE SET
+        ON CONFLICT(project_id, category, key) DO UPDATE SET
           value = excluded.value,
           description = excluded.description,
           tags = excluded.tags,
@@ -312,8 +312,7 @@ export function registerMemoryTools(
       const stmt = db.prepare(`
         INSERT INTO context (project_id, key, value, updated_at)
         VALUES (?, ?, ?, datetime('now'))
-        ON CONFLICT(key) DO UPDATE SET
-          project_id = excluded.project_id,
+        ON CONFLICT(project_id, key) DO UPDATE SET
           value = excluded.value,
           updated_at = datetime('now')
       `);

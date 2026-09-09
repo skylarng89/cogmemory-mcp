@@ -638,8 +638,7 @@ function updateFileIndex(
   const upsertFileIndex = db.prepare(`
     INSERT INTO file_index (project_id, file_path, mtime_ms, indexed_at)
     VALUES (?, ?, ?, datetime('now'))
-    ON CONFLICT(file_path) DO UPDATE SET
-      project_id = excluded.project_id,
+    ON CONFLICT(project_id, file_path) DO UPDATE SET
       mtime_ms = excluded.mtime_ms,
       indexed_at = datetime('now')
   `);

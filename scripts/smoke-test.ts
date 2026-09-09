@@ -82,7 +82,7 @@ function run() {
   db.prepare(
     `INSERT INTO conventions (category, key, value, description, tags)
      VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(category, key) DO UPDATE SET value = excluded.value`,
+     ON CONFLICT(project_id, category, key) DO UPDATE SET value = excluded.value`,
   ).run("naming", "camelCase", "true", "Use camelCase for variables", "style");
   const conv = db
     .prepare("SELECT * FROM conventions WHERE category = ? AND key = ?")
@@ -110,7 +110,7 @@ function run() {
   console.log("\n📋 Context");
   db.prepare(
     `INSERT INTO context (key, value, updated_at) VALUES (?, ?, datetime('now'))
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
+     ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
   ).run("active_task", "Building smoke test");
   const ctx = db
     .prepare("SELECT * FROM context WHERE key = ?")
@@ -449,7 +449,7 @@ main()
 
   // cogmemory_status: verify schema version
   const userVersion = db.pragma("user_version", { simple: true }) as number;
-  assert(userVersion === 8, "schema version is 8 after all migrations");
+  assert(userVersion === 9, "schema version is 9 after all migrations");
 
   // Verify new tables exist
   try {

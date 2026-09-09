@@ -395,7 +395,9 @@ cogmemory-mcp/
 │   │       ├── 004_symbol_embeddings.sql
 │   │       ├── 005_edge_metadata.sql
 │   │       ├── 006_symbol_tokens.sql
-│   │       └── 007_symbol_minhash.sql
+│   │       ├── 007_symbol_minhash.sql
+│   │       ├── 008_project_scoping.sql
+│   │       └── 009_project_scoped_uniques.sql
 │   ├── tools/
 │   │   ├── memory.ts            # decisions/conventions/errors/context/changelog/recall
 │   │   ├── plan-tasks.ts        # plan + tasks tools
@@ -436,7 +438,7 @@ cogmemory-mcp/
 - **Recall FTS:** `recall_docs` (content table) + `recall_fts` (FTS5 virtual table) — powers `recall`
 - **Knowledge Graph FTS:** `kg_docs` (content table) + `kg_fts` (FTS5 virtual table) — powers `search_knowledge`
 
-Schema migrations are automatic via `PRAGMA user_version` (currently at version 7).
+Schema migrations are automatic via `PRAGMA user_version` (currently at version 9).
 
 ---
 
