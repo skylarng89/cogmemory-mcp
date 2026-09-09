@@ -9,6 +9,7 @@ import {
   resolveWorkspaceRoot,
   resolveProjectIdentity,
 } from "./config.js";
+import { createActiveProjectRef } from "./active-project.js";
 import { openDatabase, closeDatabase } from "./db/connection.js";
 import { registerSessionTools } from "./tools/sessions.js";
 import { registerMemoryTools } from "./tools/memory.js";
@@ -25,8 +26,10 @@ import { runStartupUpdateCheck } from "./update-check.js";
 import { SchemaVersionError } from "./db/migration-runner.js";
 
 async function main(): Promise<void> {
-  // Resolve workspace root and config
-  const workspaceRoot = resolveWorkspaceRoot(process.argv);
+  // Resolve workspace root and config (git-root discovery is the default
+  // signal; explicit --workspace / COGMEMORY_WORKSPACE still wins — ADR-7)
+  const { root: workspaceRoot, source: resolutionSource } =
+    resolveWorkspaceRoot(process.argv);
   const config = resolveConfig(workspaceRoot);
 
   // Lightweight update check (fail-safe, stderr-only, 24h interval cache).
@@ -38,7 +41,7 @@ async function main(): Promise<void> {
 
   // Resolve project identity (slug in .cogmemory/config.json + projects table row)
   const project = resolveProjectIdentity(workspaceRoot, db, config.scope);
-  const projectId = project.projectId;
+  const activeProject = createActiveProjectRef(project.projectId);
 
   // Ensure cleanup on exit
   process.on("SIGINT", () => {
@@ -56,22 +59,35 @@ async function main(): Promise<void> {
     version: VERSION,
   });
 
-  // Register all tools (every tool is scoped to the active project)
-  registerSessionTools(server, db, projectId);
-  registerMemoryTools(server, db, projectId);
-  registerPlanTasksTools(server, db, projectId);
-  registerKnowledgeGraphTools(server, db, projectId);
-  registerSpecsTools(server, db, projectId);
-  registerCodeGraphTools(server, db, workspaceRoot, projectId);
-  registerCodemapTools(server, db, projectId);
-  registerListDeleteTools(server, db, projectId);
-  registerIntrospectionTools(server, db, workspaceRoot, project);
-  registerCodeAnalysisTools(server, db, workspaceRoot, projectId);
-  registerProjectTools(server, db, projectId);
+  // Register all tools (every tool reads the active project ref at call time)
+  registerSessionTools(server, db, activeProject);
+  registerMemoryTools(server, db, activeProject);
+  registerPlanTasksTools(server, db, activeProject);
+  registerKnowledgeGraphTools(server, db, activeProject);
+  registerSpecsTools(server, db, activeProject);
+  registerCodeGraphTools(server, db, workspaceRoot, activeProject);
+  registerCodemapTools(server, db, activeProject);
+  registerListDeleteTools(server, db, activeProject);
+  registerIntrospectionTools(
+    server,
+    db,
+    workspaceRoot,
+    activeProject,
+    resolutionSource,
+  );
+  registerCodeAnalysisTools(server, db, workspaceRoot, activeProject);
+  registerProjectTools(
+    server,
+    db,
+    activeProject,
+    workspaceRoot,
+    config.scope,
+    resolutionSource,
+  );
 
   // Log to stderr (stdio transport uses stdout for protocol)
   console.error(
-    `CogMemory MCP server v${VERSION} running on stdio (${config.scope} scope → ${config.dbPath}, project ${project.label} [${project.slug.slice(0, 8)}…])`,
+    `CogMemory MCP server v${VERSION} running on stdio (${config.scope} scope → ${config.dbPath}, project ${project.label} [${project.slug.slice(0, 8)}…], workspace root ${workspaceRoot} via ${resolutionSource})`,
   );
 
   // Connect via stdio transport

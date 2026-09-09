@@ -78,7 +78,7 @@ Add to `.vscode/mcp.json` (workspace-scoped):
 }
 ```
 
-Or use `--workspace` for multi-root support:
+Or use `--workspace` for multi-root support (rarely needed — see [Workspace Resolution](#workspace-resolution--multi-root-support)):
 
 ```json
 {
@@ -94,6 +94,12 @@ Or use `--workspace` for multi-root support:
   }
 }
 ```
+
+> **Zero-config default:** if you omit `--workspace`, CogMemory discovers the
+> project automatically from the working directory (git root first, then the
+> nearest `.cogmemory/` parent). One server entry is enough for all projects —
+> each repo gets its own memory bucket. Only pin `--workspace` for monorepo
+> sub-root targeting.
 
 ### Cursor
 
@@ -215,14 +221,17 @@ CogMemory is published to the [MCP Registry](https://registry.modelcontextprotoc
 
 CogMemory resolves scope in priority order:
 
-1. **`.cogmemory/config.json`** in workspace root:
+1. **`.cogmemory/config.json`** in the workspace root (project-level override):
 
    ```json
-   { "scope": "global" }
+   { "scope": "workspace" }
    ```
 
-2. **Environment variable**: `COGMEMORY_SCOPE=global`
-3. **Default**: `workspace`
+2. **Environment variable**: `COGMEMORY_SCOPE=global` or `COGMEMORY_SCOPE=workspace`
+3. **User-level fallback**: `~/.cogmemory/config.json` (scope settings only)
+4. **Default: `global`** — one shared DB at `~/.cogmemory/global.db`
+
+> **Default is global.** All projects share `~/.cogmemory/global.db`, with each project's memories isolated by its own `project_id` (see [Project Identity](#project-identity)). To give a project its own private DB, add `{ "scope": "workspace" }` to that project's `.cogmemory/config.json` — or set `COGMEMORY_SCOPE=workspace` to make workspace the default everywhere.
 
 ### Paths
 
@@ -230,6 +239,8 @@ CogMemory resolves scope in priority order:
 | --------- | --------------------------------------- |
 | workspace | `<workspace_root>/.cogmemory/memory.db` |
 | global    | `~/.cogmemory/global.db`                |
+
+> **Upgrading?** If a workspace has an existing `memory.db` but no config file, CogMemory logs a one-time stderr advisory when the new global default bypasses it — add `{ "scope": "workspace" }` to that project to keep using the old DB.
 
 ---
 
@@ -252,8 +263,19 @@ Every project gets a **stable, opaque slug** (UUID) stored in `.cogmemory/config
 | `list_projects`  | All projects with row counts, last-seen timestamps, staleness flags   |
 | `rename_project` | Change a project's display label (slug is immutable)                  |
 | `prune_projects` | Permanently delete a project and all of its rows (requires `confirm`) |
+| `switch_project` | Re-resolve the active project at runtime from a workspace root        |
 
-`cogmemory_status` reports `active_project: { id, slug, label }`, and in verbose mode shows per-table counts scoped to the active project.
+`cogmemory_status` reports `workspace_root`, `root_path_hint`, `resolution_source` (`override` | `git-root` | `dotcogmemory` | `cwd-fallback`), and `active_project: { id, slug, label }`, plus per-table counts in verbose mode.
+
+### Runtime Project Switching
+
+If your client pins a fixed `--workspace`/`cwd` that doesn't match the repo you're actually working in (e.g. an agent opened a different repository mid-session), call `switch_project` with the target repo's absolute root:
+
+```json
+{ "root_dir": "/mnt/repos/my-project" }
+```
+
+The active project (and every subsequent tool call) re-scopes to that root. A missing identity slug is bootstrapped and persisted to `<root>/.cogmemory/config.json` automatically. Invalid paths fail closed — the previous project stays active.
 
 ### Multi-Root / Monorepos
 
@@ -263,12 +285,19 @@ Nearest-ancestor `.cogmemory/` wins when walking up from CWD. In monorepos, pin 
 
 ## Workspace Resolution & Multi-Root Support
 
-CogMemory resolves the workspace root (where `.cogmemory/memory.db` lives) in this priority order:
+CogMemory resolves the workspace root (and thus the project identity anchor) in this priority order:
 
-1. **`--workspace <path>`** CLI argument (highest priority)
-2. **`COGMEMORY_WORKSPACE`** environment variable
-3. **Walk up from CWD** looking for the nearest parent containing a `.cogmemory/` directory
-4. **Fallback to CWD**
+1. **`--workspace <path>`** CLI argument (explicit override, highest priority)
+2. **`COGMEMORY_WORKSPACE`** environment variable (explicit override)
+3. **Git root** — walk up from CWD looking for the nearest `.git/` entry (default signal for git repositories)
+4. **Walk up from CWD** looking for the nearest parent containing a `.cogmemory/` directory
+5. **Fallback to CWD**
+
+For most clients **no configuration is needed**: launch CogMemory with no `--workspace` and it attaches to the git repository containing the client's working directory. Every repo therefore gets its own project identity automatically.
+
+Pin `--workspace`/`COGMEMORY_WORKSPACE` only when the identity anchor must differ from the git root — e.g. targeting a subdirectory of a monorepo as a separate project.
+
+When the resolved root diverges from where a slug was last seen (e.g. a client pinned the home directory and an unrelated repo's slug was reused), CogMemory logs a stderr advisory at boot and reports both `workspace_root` and `root_path_hint` in `cogmemory_status` so the mismatch is visible before any memories are written.
 
 ---
 
@@ -296,7 +325,7 @@ To disable this check:
 
 ---
 
-## Tool Reference (40 tools)
+## Tool Reference (41 tools)
 
 ### Memory Tools (14)
 
@@ -372,6 +401,15 @@ To disable this check:
 | `delete_by_key`   | Delete a context entry by its string key                       |
 | `delete_by_path`  | Remove a file from the code graph file_index                   |
 | `purge_subsystem` | Remove ALL rows from a subsystem (requires `confirm=true`)     |
+
+### Project Tools (4)
+
+| Tool             | Description                                                                  |
+| ---------------- | ---------------------------------------------------------------------------- |
+| `list_projects`  | List all projects with row counts, staleness flags; active project marked    |
+| `rename_project` | Rename a project's display label (slug is immutable)                         |
+| `prune_projects` | Permanently delete a project and all of its rows (requires `confirm=true`)   |
+| `switch_project` | Re-resolve the active project at runtime from a workspace root (fail-closed) |
 
 ---
 

@@ -42,17 +42,18 @@ export interface ProjectIdentity {
  * Resolve the CogMemory configuration following priority order:
  * 1. `.cogmemory/config.json` in workspace root → `"scope": "workspace" | "global"`
  * 2. Environment variable `COGMEMORY_SCOPE`
- * 3. Default: `workspace`
+ * 3. User-level `~/.cogmemory/config.json` (scope/settings fallback)
+ * 4. Default: `global`
  */
 export function resolveConfig(workspaceRoot: string): Config {
-  // 1. Check .cogmemory/config.json
+  // 1. Check .cogmemory/config.json in the workspace root
   const configPath = join(workspaceRoot, ".cogmemory", "config.json");
   if (existsSync(configPath)) {
     try {
       const raw = readFileSync(configPath, "utf-8");
       const parsed: ConfigFile = JSON.parse(raw);
       if (parsed.scope === "global") {
-        return buildGlobalConfig();
+        return buildGlobalConfig(workspaceRoot);
       }
       if (parsed.scope === "workspace") {
         return buildWorkspaceConfig(workspaceRoot);
@@ -65,11 +66,40 @@ export function resolveConfig(workspaceRoot: string): Config {
   // 2. Environment variable
   const envScope = process.env.COGMEMORY_SCOPE;
   if (envScope === "global") {
-    return buildGlobalConfig();
+    return buildGlobalConfig(workspaceRoot);
+  }
+  if (envScope === "workspace") {
+    return buildWorkspaceConfig(workspaceRoot);
   }
 
-  // 3. Default: workspace
-  return buildWorkspaceConfig(workspaceRoot);
+  // 3. User-level fallback: ~/.cogmemory/config.json acts as a global
+  //    settings file (scope only — never project identity, per ADR-8).
+  const userConfigPath = join(homedir(), ".cogmemory", "config.json");
+  if (existsSync(userConfigPath)) {
+    try {
+      const parsed: ConfigFile = JSON.parse(
+        readFileSync(userConfigPath, "utf-8"),
+      );
+      if (parsed.scope === "workspace") {
+        return buildWorkspaceConfig(workspaceRoot);
+      }
+      // scope "global" or absent in the user file → global default below
+    } catch {
+      // Malformed user config — fall through to default
+    }
+  }
+
+  // 4. Default: global (one shared DB at ~/.cogmemory/global.db; project
+  //    identity still anchored per-repo — see ADR-8).
+  // Advisory for upgraders: if this workspace has an existing pre-default
+  // workspace DB, point it out so the scope switch isn't silent.
+  const legacyWsDb = join(workspaceRoot, ".cogmemory", "memory.db");
+  if (existsSync(legacyWsDb)) {
+    console.error(
+      `[cogmemory] Defaulting to global scope (${join(homedir(), ".cogmemory", "global.db")}); this workspace has an existing DB at ${legacyWsDb}. Add {"scope": "workspace"} to ${join(workspaceRoot, ".cogmemory", "config.json")} to keep using it.`,
+    );
+  }
+  return buildGlobalConfig(workspaceRoot);
 }
 
 function buildWorkspaceConfig(workspaceRoot: string): Config {
@@ -82,13 +112,20 @@ function buildWorkspaceConfig(workspaceRoot: string): Config {
   };
 }
 
-function buildGlobalConfig(): Config {
+/**
+ * Global scope shares one DB (~/.cogmemory/global.db) across all projects,
+ * but project identity is still anchored to the discovered workspace root —
+ * NOT to the home directory (ADR-8). This keeps ~/.cogmemory/config.json a
+ * pure scope/settings file and prevents one stale slug from being reused as
+ * the identity for every project the user opens.
+ */
+function buildGlobalConfig(workspaceRoot: string): Config {
   const dir = join(homedir(), ".cogmemory");
   mkdirSync(dir, { recursive: true });
   return {
     scope: "global",
     dbPath: join(dir, "global.db"),
-    workspaceRoot: homedir(),
+    workspaceRoot,
   };
 }
 
@@ -118,6 +155,30 @@ function findCogmemoryDir(start: string): string | null {
 }
 
 /**
+ * Walk up from a starting directory looking for a `.git/` entry (file or
+ * directory — covers worktrees/submodules where .git is a file).
+ * Returns the directory containing it, or null if not found.
+ */
+function findGitRoot(start: string): string | null {
+  let current = resolve(start);
+  const fsRoot = dirname(current);
+  while (current !== fsRoot) {
+    const candidate = join(current, ".git");
+    try {
+      if (existsSync(candidate)) {
+        return current;
+      }
+    } catch {
+      // Continue searching upward
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return null;
+}
+
+/**
  * Try to resolve and validate a path. Returns it if it exists, null otherwise.
  */
 function tryPath(path: string, label: string): string | null {
@@ -129,26 +190,44 @@ function tryPath(path: string, label: string): string | null {
   return null;
 }
 
+export type ResolutionSource =
+  | "override"
+  | "git-root"
+  | "dotcogmemory"
+  | "cwd-fallback";
+
+export interface WorkspaceResolution {
+  root: string;
+  source: ResolutionSource;
+}
+
 /**
  * Determine the workspace root using the following priority:
- * 1. `--workspace <path>` CLI argument
- * 2. `COGMEMORY_WORKSPACE` environment variable
- * 3. Walk up from CWD looking for a `.cogmemory/` directory
- * 4. Fall back to CWD
+ * 1. `--workspace <path>` CLI argument (explicit override)
+ * 2. `COGMEMORY_WORKSPACE` environment variable (explicit override)
+ * 3. Walk up from CWD looking for a `.git/` entry (git-root discovery, ADR-7)
+ * 4. Walk up from CWD looking for a `.cogmemory/` directory
+ * 5. Fall back to CWD
  */
-export function resolveWorkspaceRoot(argv: string[]): string {
+export function resolveWorkspaceRoot(argv: string[]): WorkspaceResolution {
   const argIdx = argv.indexOf("--workspace");
   if (argIdx !== -1 && argv[argIdx + 1]) {
     const r = tryPath(argv[argIdx + 1], "--workspace");
-    if (r) return r;
+    if (r) return { root: r, source: "override" };
   }
 
   if (process.env.COGMEMORY_WORKSPACE) {
     const r = tryPath(process.env.COGMEMORY_WORKSPACE, "COGMEMORY_WORKSPACE");
-    if (r) return r;
+    if (r) return { root: r, source: "override" };
   }
 
-  return findCogmemoryDir(".") ?? resolve(".");
+  const gitRoot = findGitRoot(".");
+  if (gitRoot) return { root: gitRoot, source: "git-root" };
+
+  const cogDir = findCogmemoryDir(".");
+  if (cogDir) return { root: cogDir, source: "dotcogmemory" };
+
+  return { root: resolve("."), source: "cwd-fallback" };
 }
 
 // ─── Project identity resolution ──────────────────────────
@@ -269,9 +348,26 @@ export function resolveProjectIdentity(
   const existingSlug = readConfigFile(workspaceRoot).project_id;
   if (existingSlug) {
     const row = findBySlug.get(existingSlug) as
-      | { id: number; slug: string; label: string | null }
+      | {
+          id: number;
+          slug: string;
+          label: string | null;
+          root_path_hint: string | null;
+        }
       | undefined;
     if (row) {
+      // ADR-10: advisory when the slug's last-seen root diverges from the
+      // current root. Non-blocking — a legitimate rename/move is the common
+      // case, so we still touch root_path_hint to the new value.
+      if (row.root_path_hint) {
+        const oldBase = basename(resolve(row.root_path_hint));
+        const newBase = basename(rootHint);
+        if (oldBase !== newBase) {
+          console.error(
+            `[cogmemory] Warning: resolved slug ${row.slug.slice(0, 8)}… was last seen at "${oldBase}", current workspace is "${newBase}" — continuing, but if this is unexpected, run switch_project or clear .cogmemory/config.json`,
+          );
+        }
+      }
       return adopt(row, false);
     }
     console.error(
