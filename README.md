@@ -383,6 +383,7 @@ cogmemory-mcp/
 │   ├── index.ts                 # entry point, server bootstrap
 │   ├── version.ts               # auto-generated version constant
 │   ├── config.ts                # scope resolution, path resolution
+│   ├── update-check.ts          # fail-safe startup update notifier (update-notifier)
 │   ├── types.ts                 # shared TS types mirroring schema
 │   ├── db/
 │   │   ├── connection.ts        # DB open/close, pragma setup

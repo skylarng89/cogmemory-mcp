@@ -9,7 +9,24 @@ import { readdirSync, readFileSync, copyFileSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 
 /** Maximum migration version this codebase supports. */
-const MAX_VERSION = 9;
+export const MAX_VERSION = 9;
+
+/**
+ * Thrown when a database was written by a NEWER version of CogMemory
+ * (user_version > MAX_VERSION). Opening it with an older binary risks
+ * corrupting state (missing columns/tables/constraints), so startup is
+ * refused instead of silently skipping migrations.
+ */
+export class SchemaVersionError extends Error {
+  constructor(dbVersion: number, supportedVersion: number) {
+    super(
+      `Database schema v${dbVersion} is newer than this CogMemory build supports (v${supportedVersion}). ` +
+        `Refusing to open to avoid corrupting state. ` +
+        `Upgrade cogmemory-mcp (npm i -g cogmemory-mcp@latest) or restore a backup.`,
+    );
+    this.name = "SchemaVersionError";
+  }
+}
 
 /**
  * Migrations that rewrite table structure in bulk and therefore always
@@ -47,6 +64,14 @@ function shouldBackup(current: number, files: MigrationFile[]): boolean {
  */
 export function runMigrations(db: Database.Database, dbPath: string): void {
   const current = (db.pragma("user_version", { simple: true }) as number) ?? 0;
+
+  // Downgrade guard: a DB written by a newer binary may contain tables,
+  // columns, or constraints this build knows nothing about. Silently skipping
+  // migrations (the old behavior) would let the old code write against a
+  // schema it does not understand — refuse instead.
+  if (current > MAX_VERSION) {
+    throw new SchemaVersionError(current, MAX_VERSION);
+  }
 
   if (current >= MAX_VERSION) {
     return; // Already up-to-date

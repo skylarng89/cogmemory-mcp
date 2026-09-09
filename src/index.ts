@@ -21,11 +21,17 @@ import { registerListDeleteTools } from "./tools/list-delete.js";
 import { registerIntrospectionTools } from "./tools/introspection.js";
 import { registerCodeAnalysisTools } from "./tools/code-analysis.js";
 import { registerProjectTools } from "./tools/projects.js";
+import { runStartupUpdateCheck } from "./update-check.js";
+import { SchemaVersionError } from "./db/migration-runner.js";
 
 async function main(): Promise<void> {
   // Resolve workspace root and config
   const workspaceRoot = resolveWorkspaceRoot(process.argv);
   const config = resolveConfig(workspaceRoot);
+
+  // Lightweight update check (fail-safe, stderr-only, 24h interval cache).
+  // Runs before the DB opens so the notification prints ahead of migration logs.
+  runStartupUpdateCheck(workspaceRoot);
 
   // Open database (runs migration on first open)
   const db = openDatabase(config.dbPath);
@@ -76,7 +82,12 @@ async function main(): Promise<void> {
 try {
   await main();
 } catch (err) {
-  console.error("Fatal error:", err);
+  if (err instanceof SchemaVersionError) {
+    // Downgrade protection: DB was written by a newer CogMemory build.
+    console.error(`[cogmemory] ${err.message}`);
+  } else {
+    console.error("Fatal error:", err);
+  }
   closeDatabase();
   process.exit(1);
 }
