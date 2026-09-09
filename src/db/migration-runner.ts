@@ -20,7 +20,7 @@ export const MAX_VERSION = 9;
  * `ON CONFLICT(project_id, key)` etc., which fails against the legacy
  * single-column constraints, so we detect and self-heal by re-running 009.
  */
-const MIGRATION_009_MARKER = "UNIQUE(project_id, key)";
+const MIGRATION_009_MARKER = "UNIQUE(PROJECT_ID, KEY)";
 
 /** Table the 009 marker lives on. */
 const MIGRATION_009_MARKER_TABLE = "context";
