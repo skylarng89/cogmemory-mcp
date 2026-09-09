@@ -5,7 +5,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
 import { wrapHandler, jsonOk, projectPredicate } from "./utils.js";
 import { VERSION } from "../version.js";
-import type { ProjectIdentity } from "../config.js";
+import type { ResolutionSource } from "../config.js";
+import type { ActiveProjectRef } from "../active-project.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -147,7 +148,8 @@ export function registerIntrospectionTools(
   server: McpServer,
   db: Database.Database,
   workspaceRoot: string,
-  project: ProjectIdentity,
+  activeProject: ActiveProjectRef,
+  resolutionSource: ResolutionSource,
 ): void {
   // ── cogmemory_status ──
   server.registerTool(
@@ -163,6 +165,13 @@ export function registerIntrospectionTools(
       }),
     },
     wrapHandler("cogmemory_status", async ({ verbose }) => {
+      const projectId = activeProject.get();
+      const rootPathHint =
+        (
+          db
+            .prepare("SELECT root_path_hint FROM projects WHERE id = ?")
+            .get(projectId) as { root_path_hint: string | null } | undefined
+        )?.root_path_hint ?? null;
       const schemaVersion = db.pragma("user_version", {
         simple: true,
       }) as number;
@@ -174,36 +183,45 @@ export function registerIntrospectionTools(
 
       const { coveragePct, lastIndexedAt } = computeIndexCoverage(
         db,
-        project.projectId,
+        projectId,
       );
       const symbolCount = (
         db
           .prepare(
             `SELECT COUNT(*) as cnt FROM symbols WHERE ${projectPredicate()}`,
           )
-          .get(project.projectId) as { cnt: number }
+          .get(projectId) as { cnt: number }
       ).cnt;
       const edgeCount = (
         db
           .prepare(
             `SELECT COUNT(*) as cnt FROM edges WHERE ${projectPredicate()}`,
           )
-          .get(project.projectId) as { cnt: number }
+          .get(projectId) as { cnt: number }
       ).cnt;
 
       const result: Record<string, unknown> = {
         package_version: VERSION,
         schema_version: schemaVersion,
         workspace_root: workspaceRoot,
+        root_path_hint: rootPathHint,
+        resolution_source: resolutionSource,
         db_path: dbPath,
         scope,
         node_version: process.version,
         update_check_enabled: !isUpdateCheckDisabled(workspaceRoot),
         active_project: {
-          id: project.projectId,
-          slug: project.slug,
-          label: project.label,
-          is_new_project: project.isNewProject,
+          id: projectId,
+          slug: (
+            db
+              .prepare("SELECT slug FROM projects WHERE id = ?")
+              .get(projectId) as { slug: string } | undefined
+          )?.slug,
+          label: (
+            db
+              .prepare("SELECT label FROM projects WHERE id = ?")
+              .get(projectId) as { label: string | null } | undefined
+          )?.label,
         },
         index: {
           total_symbols: symbolCount,
@@ -214,7 +232,7 @@ export function registerIntrospectionTools(
       };
 
       if (verbose) {
-        result.counts = getTableCounts(db, project.projectId);
+        result.counts = getTableCounts(db, projectId);
       }
 
       return jsonOk(result);
@@ -244,7 +262,7 @@ export function registerIntrospectionTools(
       try {
         const cached = db
           .prepare("SELECT value FROM context WHERE key = ? AND project_id = ?")
-          .get(CACHE_KEY, project.projectId) as { value: string } | undefined;
+          .get(CACHE_KEY, activeProject.get()) as { value: string } | undefined;
 
         if (cached) {
           const parsed = JSON.parse(cached.value);
@@ -295,7 +313,7 @@ export function registerIntrospectionTools(
              VALUES (?, ?, ?, datetime('now'))
              ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
           ).run(
-            project.projectId,
+            activeProject.get(),
             CACHE_KEY,
             JSON.stringify({ latest, timestamp: Date.now() }),
           );

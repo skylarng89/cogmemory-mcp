@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
 import { wrapHandler, resolveSessionId, projectPredicate } from "./utils.js";
+import type { ActiveProjectRef } from "../active-project.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -173,7 +174,7 @@ function filteredQuery(
 export function registerMemoryTools(
   server: McpServer,
   db: Database.Database,
-  projectId: number,
+  activeProject: ActiveProjectRef,
 ): void {
   // ── remember_decision ──
   server.registerTool(
@@ -190,7 +191,7 @@ export function registerMemoryTools(
         VALUES (?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
-          projectId,
+          activeProject.get(),
           resolveSessionId(db, session_id),
           title,
           rationale ?? null,
@@ -233,7 +234,7 @@ export function registerMemoryTools(
           updated_at = datetime('now')
       `);
         const result = stmt.run(
-          projectId,
+          activeProject.get(),
           category,
           key,
           value ?? null,
@@ -278,7 +279,7 @@ export function registerMemoryTools(
         VALUES (?, ?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
-          projectId,
+          activeProject.get(),
           resolveSessionId(db, session_id),
           error_signature,
           description ?? null,
@@ -316,7 +317,7 @@ export function registerMemoryTools(
           value = excluded.value,
           updated_at = datetime('now')
       `);
-      stmt.run(projectId, key, value ?? null);
+      stmt.run(activeProject.get(), key, value ?? null);
       return {
         content: [
           {
@@ -343,7 +344,7 @@ export function registerMemoryTools(
         .prepare(
           `SELECT key, value, updated_at FROM context WHERE key = ? AND ${projectPredicate()}`,
         )
-        .get(key, projectId) as
+        .get(key, activeProject.get()) as
         | { key: string; value: string | null; updated_at: string }
         | undefined;
 
@@ -385,7 +386,7 @@ export function registerMemoryTools(
         VALUES (?, ?, ?, ?)
       `);
       const result = stmt.run(
-        projectId,
+        activeProject.get(),
         resolveSessionId(db, session_id),
         summary,
         ref ?? null,
@@ -415,6 +416,7 @@ export function registerMemoryTools(
     },
     wrapHandler("recall", async ({ text, tags, session_id, since, limit }) => {
       const lim = limit ?? 20;
+      const projectId = activeProject.get();
       const results: Record<string, unknown[]> = {};
 
       if (text) {

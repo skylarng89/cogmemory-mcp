@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
 import { wrapHandler, projectPredicate } from "./utils.js";
+import type { ActiveProjectRef } from "../active-project.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -26,7 +27,7 @@ export const GetSessionSummarySchema = z.object({
 export function registerSessionTools(
   server: McpServer,
   db: Database.Database,
-  projectId: number,
+  activeProject: ActiveProjectRef,
 ): void {
   // ── start_session ──
   server.registerTool(
@@ -37,7 +38,7 @@ export function registerSessionTools(
     },
     wrapHandler("start_session", async () => {
       const stmt = db.prepare("INSERT INTO sessions (project_id) VALUES (?)");
-      const result = stmt.run(projectId);
+      const result = stmt.run(activeProject.get());
       return {
         content: [
           {
@@ -103,6 +104,7 @@ export function registerSessionTools(
       inputSchema: GetSessionSummarySchema,
     },
     wrapHandler("get_session_summary", async ({ id }) => {
+      const projectId = activeProject.get();
       const session = db
         .prepare("SELECT * FROM sessions WHERE id = ?")
         .get(id) as Record<string, unknown> | undefined;

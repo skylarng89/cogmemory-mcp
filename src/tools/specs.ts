@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
 import { wrapHandler, projectPredicate } from "./utils.js";
+import type { ActiveProjectRef } from "../active-project.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -48,7 +49,7 @@ export const UpdateSpecSchema = z.object({
 export function registerSpecsTools(
   server: McpServer,
   db: Database.Database,
-  projectId: number,
+  activeProject: ActiveProjectRef,
 ): void {
   // ── create_spec ──
   server.registerTool(
@@ -61,6 +62,7 @@ export function registerSpecsTools(
     wrapHandler(
       "create_spec",
       async ({ title, content, format, entity_id }) => {
+        const projectId = activeProject.get();
         // Validate entity_id if provided (and belongs to this project)
         if (entity_id !== undefined) {
           const entity = db
@@ -119,6 +121,7 @@ export function registerSpecsTools(
       inputSchema: GetSpecSchema,
     },
     wrapHandler("get_spec", async ({ id, title }) => {
+      const projectId = activeProject.get();
       let spec: Record<string, unknown> | undefined;
 
       if (id !== undefined) {
@@ -167,6 +170,7 @@ export function registerSpecsTools(
       inputSchema: UpdateSpecSchema,
     },
     wrapHandler("update_spec", async ({ id, content, title, entity_id }) => {
+      const projectId = activeProject.get();
       // Fetch current spec (scoped to the active project)
       const current = db
         .prepare(`SELECT * FROM specs WHERE id = ? AND ${projectPredicate()}`)

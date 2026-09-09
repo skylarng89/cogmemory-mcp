@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
 import { wrapHandler, projectPredicate } from "./utils.js";
+import type { ActiveProjectRef } from "../active-project.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -56,7 +57,7 @@ export const AnnotateSymbolSchema = z
 export function registerCodemapTools(
   server: McpServer,
   db: Database.Database,
-  projectId: number,
+  activeProject: ActiveProjectRef,
 ): void {
   // ── generate_codemap ──
   server.registerTool(
@@ -76,6 +77,7 @@ export function registerCodemapTools(
         save_as_trace,
         trace_description,
       }) => {
+        const projectId = activeProject.get();
         const hops = max_hops ?? 3;
         const nodes = max_nodes ?? 50;
         const withAnnotations = include_annotations !== false;
@@ -188,6 +190,7 @@ export function registerCodemapTools(
     wrapHandler(
       "annotate_symbol",
       async ({ symbol_id, trace_id, annotation }) => {
+        const projectId = activeProject.get();
         // Validate symbol_id if provided
         if (symbol_id !== undefined) {
           const symbol = db

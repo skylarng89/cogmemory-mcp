@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
 import { wrapHandler, jsonOk, projectPredicate } from "./utils.js";
+import type { ActiveProjectRef } from "../active-project.js";
 import { walkFilesWithMtime } from "../indexing/walker.js";
 import { EDGE_TYPES, STRUCTURAL_EDGE_TYPES } from "../indexing/edge-types.js";
 import { readFileSync, existsSync } from "node:fs";
@@ -235,7 +236,7 @@ export function registerCodeAnalysisTools(
   server: McpServer,
   db: Database.Database,
   workspaceRoot: string,
-  projectId: number,
+  activeProject: ActiveProjectRef,
 ): void {
   const hasBodyHash = hasColumn(db, "symbols", "body_hash");
   const hasIsExported = hasColumn(db, "symbols", "is_exported");
@@ -292,6 +293,7 @@ export function registerCodeAnalysisTools(
         file_path,
         context_lines: ctxLines,
       }) => {
+        const projectId = activeProject.get();
         const padding = ctxLines ?? 0;
 
         let symbol: Record<string, unknown> | undefined;
@@ -392,6 +394,7 @@ export function registerCodeAnalysisTools(
       }),
     },
     wrapHandler("check_index_coverage", async ({ root_dir, extensions }) => {
+      const projectId = activeProject.get();
       const targetDir = resolve(root_dir ?? workspaceRoot);
       const exts = extensions ?? ["ts", "tsx", "js", "jsx", "mjs", "cjs", "py"];
 
@@ -501,6 +504,7 @@ export function registerCodeAnalysisTools(
       }),
     },
     wrapHandler("find_dead_code", async (params) => {
+      const projectId = activeProject.get();
       const patterns = params.entry_point_patterns ?? [
         "main",
         "index",
@@ -618,6 +622,7 @@ export function registerCodeAnalysisTools(
       }),
     },
     wrapHandler("query_graph", async (params) => {
+      const projectId = activeProject.get();
       const maxDepth = params.max_depth ?? 5;
       const direction = params.direction ?? "both";
       const types = params.edge_types ?? STRUCTURAL_EDGE_TYPES.slice();
@@ -762,6 +767,7 @@ export function registerCodeAnalysisTools(
       }),
     },
     wrapHandler("analyze_impact", async (params) => {
+      const projectId = activeProject.get();
       const maxDepth = params.max_depth ?? 5;
       const types = params.edge_types ?? [EDGE_TYPES.CALLS, EDGE_TYPES.IMPORTS];
       const includeTests = params.include_tests === true;
@@ -891,6 +897,7 @@ export function registerCodeAnalysisTools(
       }),
     },
     wrapHandler("find_duplicates", async (params) => {
+      const projectId = activeProject.get();
       const threshold = params.threshold ?? 0.7;
       const minTokens = params.min_tokens ?? 10;
       const recompute = params.recompute === true;
@@ -1014,6 +1021,7 @@ export function registerCodeAnalysisTools(
       }),
     },
     wrapHandler("find_related", async (params) => {
+      const projectId = activeProject.get();
       const threshold = params.threshold ?? 0.3;
       const limit = params.limit ?? 10;
 
@@ -1226,6 +1234,7 @@ export function registerCodeAnalysisTools(
       }),
     },
     wrapHandler("semantic_code_search", async (params) => {
+      const projectId = activeProject.get();
       const limit = params.limit ?? 20;
       const threshold = params.threshold ?? 0;
       const queryTokens = tokenize(params.query);

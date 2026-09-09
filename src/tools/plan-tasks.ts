@@ -9,6 +9,7 @@ import {
   resolvePlanId,
   projectPredicate,
 } from "./utils.js";
+import type { ActiveProjectRef } from "../active-project.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -54,7 +55,7 @@ export const UpdateTaskStatusSchema = z.object({
 export function registerPlanTasksTools(
   server: McpServer,
   db: Database.Database,
-  projectId: number,
+  activeProject: ActiveProjectRef,
 ): void {
   // ── add_plan_item ──
   server.registerTool(
@@ -71,7 +72,7 @@ export function registerPlanTasksTools(
         VALUES (?, ?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
-          projectId,
+          activeProject.get(),
           phase ?? null,
           title,
           description ?? null,
@@ -106,7 +107,7 @@ export function registerPlanTasksTools(
         UPDATE plan SET status = ?, updated_at = datetime('now')
         WHERE id = ? AND ${projectPredicate()}
       `);
-      const result = stmt.run(status, id, projectId);
+      const result = stmt.run(status, id, activeProject.get());
       if (result.changes === 0) {
         return {
           content: [
@@ -150,7 +151,7 @@ export function registerPlanTasksTools(
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
-          projectId,
+          activeProject.get(),
           resolvePlanId(db, plan_id),
           resolveSessionId(db, session_id),
           title,
@@ -186,7 +187,7 @@ export function registerPlanTasksTools(
         UPDATE tasks SET status = ?, updated_at = datetime('now')
         WHERE id = ? AND ${projectPredicate()}
       `);
-      const result = stmt.run(status, id, projectId);
+      const result = stmt.run(status, id, activeProject.get());
       if (result.changes === 0) {
         return {
           content: [

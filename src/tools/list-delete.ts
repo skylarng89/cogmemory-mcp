@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
 import { wrapHandler, projectPredicate } from "./utils.js";
+import type { ActiveProjectRef } from "../active-project.js";
 
 // ─── SUBSYSTEM REGISTRY ───────────────────────────────────
 // Maps a logical subsystem name to its backing table(s) and metadata so the
@@ -295,7 +296,7 @@ export const PurgeSubsystemSchema = z.object({
 export function registerListDeleteTools(
   server: McpServer,
   db: Database.Database,
-  projectId: number,
+  activeProject: ActiveProjectRef,
 ): void {
   // ── list_items ──
   server.registerTool(
@@ -308,6 +309,7 @@ export function registerListDeleteTools(
     wrapHandler(
       "list_items",
       async ({ subsystem, limit, session_id, tags }) => {
+        const projectId = activeProject.get();
         const meta = findTable(subsystem);
         if (!meta) {
           return {
@@ -419,6 +421,7 @@ export function registerListDeleteTools(
       inputSchema: DeleteItemSchema,
     },
     wrapHandler("delete_item", async ({ subsystem, id }) => {
+      const projectId = activeProject.get();
       const meta = findTable(subsystem);
       if (!meta) {
         return {
@@ -494,7 +497,7 @@ export function registerListDeleteTools(
     wrapHandler("delete_by_key", async ({ key }) => {
       const result = db
         .prepare(`DELETE FROM context WHERE key = ? AND ${projectPredicate()}`)
-        .run(key, projectId);
+        .run(key, activeProject.get());
       if (result.changes === 0) {
         return {
           content: [
@@ -535,7 +538,7 @@ export function registerListDeleteTools(
         .prepare(
           `DELETE FROM file_index WHERE file_path = ? AND ${projectPredicate()}`,
         )
-        .run(file_path, projectId);
+        .run(file_path, activeProject.get());
       if (result.changes === 0) {
         return {
           content: [
@@ -603,6 +606,7 @@ export function registerListDeleteTools(
       }
 
       const deleted: Record<string, number> = {};
+      const projectId = activeProject.get();
       const p = projectPredicate();
       db.transaction(() => {
         const primary = meta.hasProject

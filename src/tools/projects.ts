@@ -3,8 +3,16 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { wrapHandler, jsonOk } from "./utils.js";
 import type { Project } from "../types.js";
+import {
+  resolveProjectIdentity,
+  type Scope,
+  type ResolutionSource,
+} from "../config.js";
+import type { ActiveProjectRef } from "../active-project.js";
 
 // ─── Constants ───────────────────────────────────────────
 
@@ -75,12 +83,24 @@ export const PruneProjectSchema = z.object({
     ),
 });
 
+export const SwitchProjectSchema = z.object({
+  root_dir: z
+    .string()
+    .min(1)
+    .describe(
+      "Absolute path to the workspace root of the project to switch to (e.g. a git repository root)",
+    ),
+});
+
 // ─── TOOL REGISTRATION ────────────────────────────────────
 
 export function registerProjectTools(
   server: McpServer,
   db: Database.Database,
-  activeProjectId: number,
+  activeProject: ActiveProjectRef,
+  bootWorkspaceRoot: string,
+  scope: Scope,
+  resolutionSource?: ResolutionSource,
 ): void {
   // ── list_projects ──
   server.registerTool(
@@ -99,7 +119,7 @@ export function registerProjectTools(
 
       const enriched = projects.map((p) => ({
         ...p,
-        is_active: p.id === activeProjectId,
+        is_active: p.id === activeProject.get(),
         is_stale: isStale(p.last_seen_at),
         row_counts: countProjectRows(db, p.id),
       }));
@@ -153,11 +173,12 @@ export function registerProjectTools(
             "Pass confirm=true to prune_projects — this deletes the project and all of its rows",
         });
       }
-      if (id === activeProjectId) {
+      const activeId = activeProject.get();
+      if (id === activeId) {
         return jsonOk({
           success: false,
           message:
-            "Cannot prune the active project. Switch workspaces first, or use purge_subsystem to clear specific data instead.",
+            "Cannot prune the active project. Use switch_project to switch to a different project first, or use purge_subsystem to clear specific data instead.",
         });
       }
 
@@ -184,6 +205,48 @@ export function registerProjectTools(
         message: `Pruned project ${id} (${project.label ?? project.slug})`,
         deleted,
       });
+    }),
+  );
+
+  // ── switch_project ──
+  server.registerTool(
+    "switch_project",
+    {
+      description:
+        "Re-resolve the active project from a workspace root at runtime. Use when the MCP client pinned a stale --workspace/cwd that does not match the project being worked on (the agent can self-correct without restarting the server). Creates and persists a new project identity if the root has none.",
+      inputSchema: SwitchProjectSchema,
+    },
+    wrapHandler("switch_project", async ({ root_dir }) => {
+      // Fail-closed: never mutate the active project on an invalid path.
+      const target = resolve(root_dir);
+      if (!existsSync(target) || !statSync(target).isDirectory()) {
+        return jsonOk({
+          success: false,
+          message: `root_dir does not exist or is not a directory: ${target} — active project unchanged`,
+        });
+      }
+
+      try {
+        const identity = resolveProjectIdentity(target, db, scope);
+        activeProject.set(identity.projectId);
+        return jsonOk({
+          success: true,
+          message: `Active project is now "${identity.label}" [${identity.slug.slice(0, 8)}…] (root: ${target})`,
+          project: {
+            id: identity.projectId,
+            slug: identity.slug,
+            label: identity.label,
+            is_new_project: identity.isNewProject,
+          },
+          previous_boot_root: bootWorkspaceRoot,
+          boot_resolution_source: resolutionSource ?? null,
+        });
+      } catch (err) {
+        return jsonOk({
+          success: false,
+          message: `Failed to resolve project identity for ${target}: ${err instanceof Error ? err.message : String(err)} — active project unchanged`,
+        });
+      }
     }),
   );
 }

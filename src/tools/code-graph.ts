@@ -12,6 +12,7 @@ import { resolve } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { wrapHandler, jsonOk, projectPredicate } from "./utils.js";
+import type { ActiveProjectRef } from "../active-project.js";
 // EDGE_TYPES and STRUCTURAL_EDGE_TYPES are imported but not used in this file
 // They were previously used for validation but are no longer needed
 
@@ -789,7 +790,7 @@ export function registerCodeGraphTools(
   server: McpServer,
   db: Database.Database,
   workspaceRoot: string,
-  projectId: number,
+  activeProject: ActiveProjectRef,
 ): void {
   // ── index_codebase ──
   server.registerTool(
@@ -800,6 +801,7 @@ export function registerCodeGraphTools(
       inputSchema: IndexCodebaseSchema,
     },
     async ({ root_dir, extensions, full }) => {
+      const projectId = activeProject.get();
       const targetDir = resolve(root_dir ?? workspaceRoot);
       const exts = extensions ?? getDefaultExtensions();
 
@@ -907,6 +909,7 @@ export function registerCodeGraphTools(
     wrapHandler(
       "query_code_graph",
       async ({ symbol_name, symbol_id, file_path }) => {
+        const projectId = activeProject.get();
         let symbol: Record<string, unknown> | undefined;
 
         if (symbol_id !== undefined) {

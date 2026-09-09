@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
 import { wrapHandler, projectPredicate } from "./utils.js";
+import type { ActiveProjectRef } from "../active-project.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -63,7 +64,7 @@ export const SearchKnowledgeSchema = z.object({
 export function registerKnowledgeGraphTools(
   server: McpServer,
   db: Database.Database,
-  projectId: number,
+  activeProject: ActiveProjectRef,
 ): void {
   // ── create_entity ──
   server.registerTool(
@@ -74,6 +75,7 @@ export function registerKnowledgeGraphTools(
       inputSchema: CreateEntitySchema,
     },
     wrapHandler("create_entity", async ({ name, type }) => {
+      const projectId = activeProject.get();
       const stmt = db.prepare(`
         INSERT INTO entities (project_id, name, type)
         VALUES (?, ?, ?)
@@ -113,6 +115,7 @@ export function registerKnowledgeGraphTools(
     wrapHandler(
       "create_relation",
       async ({ from_entity_id, to_entity_id, relation_type }) => {
+        const projectId = activeProject.get();
         // Validate both entities exist (and belong to this project)
         const fromEntity = db
           .prepare(
@@ -188,6 +191,7 @@ export function registerKnowledgeGraphTools(
       inputSchema: AddObservationSchema,
     },
     wrapHandler("add_observation", async ({ entity_id, content }) => {
+      const projectId = activeProject.get();
       // Validate entity exists (and belongs to this project)
       const entity = db
         .prepare(
@@ -247,6 +251,7 @@ export function registerKnowledgeGraphTools(
         observation_text,
         limit,
       }) => {
+        const projectId = activeProject.get();
         const lim = limit ?? 50;
         const results: Record<string, unknown[]> = {};
 
