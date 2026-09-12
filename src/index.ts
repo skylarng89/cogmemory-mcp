@@ -74,6 +74,7 @@ async function main(): Promise<void> {
     workspaceRoot,
     activeProject,
     resolutionSource,
+    config.scope,
   );
   registerCodeAnalysisTools(server, db, workspaceRoot, activeProject);
   registerProjectTools(

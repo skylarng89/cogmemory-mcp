@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 
-export type Scope = "workspace" | "global";
+export type Scope = "workspace" | "global" | "project";
 
 export interface Config {
   scope: Scope;
@@ -40,10 +40,10 @@ export interface ProjectIdentity {
 
 /**
  * Resolve the CogMemory configuration following priority order:
- * 1. `.cogmemory/config.json` in workspace root → `"scope": "workspace" | "global"`
+ * 1. `.cogmemory/config.json` in workspace root → `"scope": "workspace" | "global" | "project"`
  * 2. Environment variable `COGMEMORY_SCOPE`
  * 3. User-level `~/.cogmemory/config.json` (scope/settings fallback)
- * 4. Default: `global`
+ * 4. Default: `project` (one database per clone under ~/.cogmemory/projects/)
  */
 export function resolveConfig(workspaceRoot: string): Config {
   // 1. Check .cogmemory/config.json in the workspace root
@@ -54,6 +54,9 @@ export function resolveConfig(workspaceRoot: string): Config {
       const parsed: ConfigFile = JSON.parse(raw);
       if (parsed.scope === "global") {
         return buildGlobalConfig(workspaceRoot);
+      }
+      if (parsed.scope === "project") {
+        return buildProjectConfig(workspaceRoot);
       }
       if (parsed.scope === "workspace") {
         return buildWorkspaceConfig(workspaceRoot);
@@ -71,6 +74,9 @@ export function resolveConfig(workspaceRoot: string): Config {
   if (envScope === "workspace") {
     return buildWorkspaceConfig(workspaceRoot);
   }
+  if (envScope === "project") {
+    return buildProjectConfig(workspaceRoot);
+  }
 
   // 3. User-level fallback: ~/.cogmemory/config.json acts as a global
   //    settings file (scope only — never project identity, per ADR-8).
@@ -83,23 +89,28 @@ export function resolveConfig(workspaceRoot: string): Config {
       if (parsed.scope === "workspace") {
         return buildWorkspaceConfig(workspaceRoot);
       }
-      // scope "global" or absent in the user file → global default below
+      if (parsed.scope === "project") {
+        return buildProjectConfig(workspaceRoot);
+      }
+      if (parsed.scope === "global") {
+        return buildGlobalConfig(workspaceRoot);
+      }
+      // An absent scope in the user file → project default below
     } catch {
       // Malformed user config — fall through to default
     }
   }
 
-  // 4. Default: global (one shared DB at ~/.cogmemory/global.db; project
-  //    identity still anchored per-repo — see ADR-8).
+  // 4. Default: one database per clone under ~/.cogmemory/projects/.
   // Advisory for upgraders: if this workspace has an existing pre-default
   // workspace DB, point it out so the scope switch isn't silent.
   const legacyWsDb = join(workspaceRoot, ".cogmemory", "memory.db");
   if (existsSync(legacyWsDb)) {
     console.error(
-      `[cogmemory] Defaulting to global scope (${join(homedir(), ".cogmemory", "global.db")}); this workspace has an existing DB at ${legacyWsDb}. Add {"scope": "workspace"} to ${join(workspaceRoot, ".cogmemory", "config.json")} to keep using it.`,
+      `[cogmemory] Defaulting to project scope; this workspace has an existing legacy DB at ${legacyWsDb}. Add {"scope": "workspace"} to ${join(workspaceRoot, ".cogmemory", "config.json")} to keep using it.`,
     );
   }
-  return buildGlobalConfig(workspaceRoot);
+  return buildProjectConfig(workspaceRoot);
 }
 
 function buildWorkspaceConfig(workspaceRoot: string): Config {
@@ -125,6 +136,23 @@ function buildGlobalConfig(workspaceRoot: string): Config {
   return {
     scope: "global",
     dbPath: join(dir, "global.db"),
+    workspaceRoot,
+  };
+}
+
+/**
+ * Store each clone in its own user-level database while keeping the project
+ * identity in the clone's ignored .cogmemory/config.json. The UUID is used in
+ * the filename so the path remains stable when the project is renamed or
+ * moved, and no untrusted project label can become part of a filesystem path.
+ */
+function buildProjectConfig(workspaceRoot: string): Config {
+  const projectId = ensureProjectSlug(workspaceRoot);
+  const dir = join(homedir(), ".cogmemory", "projects");
+  mkdirSync(dir, { recursive: true });
+  return {
+    scope: "project",
+    dbPath: join(dir, `memory-${projectId}.db`),
     workspaceRoot,
   };
 }
@@ -227,13 +255,42 @@ export function resolveWorkspaceRoot(argv: string[]): WorkspaceResolution {
   const cogDir = findCogmemoryDir(".");
   if (cogDir) return { root: cogDir, source: "dotcogmemory" };
 
-  return { root: resolve("."), source: "cwd-fallback" };
+  const fallbackRoot = resolve(".");
+  const userHome = resolve(homedir());
+  const filesystemRoot = dirname(fallbackRoot) === fallbackRoot;
+  if (fallbackRoot === userHome || filesystemRoot) {
+    throw new Error(
+      `[cogmemory] Refusing to create project memory from unsafe fallback directory "${fallbackRoot}". ` +
+        "Open a project workspace, set --workspace, or set COGMEMORY_WORKSPACE to its literal absolute path.",
+    );
+  }
+
+  return { root: fallbackRoot, source: "cwd-fallback" };
 }
 
 // ─── Project identity resolution ──────────────────────────
 
 function configFilePath(workspaceRoot: string): string {
   return join(workspaceRoot, ".cogmemory", "config.json");
+}
+
+const PROJECT_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function ensureProjectSlug(workspaceRoot: string): string {
+  const existing = readConfigFile(workspaceRoot).project_id;
+  if (existing && PROJECT_ID_PATTERN.test(existing)) {
+    return existing;
+  }
+
+  const slug = randomUUID();
+  if (existing) {
+    console.error(
+      `[cogmemory] Invalid project_id in ${configFilePath(workspaceRoot)} — generating a new clone identity`,
+    );
+  }
+  persistSlug(workspaceRoot, slug);
+  return readConfigFile(workspaceRoot).project_id ?? slug;
 }
 
 function readConfigFile(workspaceRoot: string): ConfigFile {

@@ -7,7 +7,8 @@ A unified [Model Context Protocol](https://modelcontextprotocol.io/) server prov
 3. **Specs** — long-form documents (PRD/SRS), optionally linked to a KG entity
 4. **Code Graph** — static structural graph (symbols/edges) + named execution traces + AI-generated annotations
 
-Storage: **SQLite** via `better-sqlite3`. One `.db` file per scope.
+Storage: **SQLite** via `better-sqlite3`. By default, each clone gets its own
+database under `~/.cogmemory/projects/`.
 
 ---
 
@@ -224,23 +225,24 @@ CogMemory resolves scope in priority order:
 1. **`.cogmemory/config.json`** in the workspace root (project-level override):
 
    ```json
-   { "scope": "workspace" }
+   { "scope": "project" }
    ```
 
-2. **Environment variable**: `COGMEMORY_SCOPE=global` or `COGMEMORY_SCOPE=workspace`
+2. **Environment variable**: `COGMEMORY_SCOPE=project`, `global`, or `workspace`
 3. **User-level fallback**: `~/.cogmemory/config.json` (scope settings only)
-4. **Default: `global`** — one shared DB at `~/.cogmemory/global.db`
+4. **Default: `project`** — one database per clone under `~/.cogmemory/projects/`
 
-> **Default is global.** All projects share `~/.cogmemory/global.db`, with each project's memories isolated by its own `project_id` (see [Project Identity](#project-identity)). To give a project its own private DB, add `{ "scope": "workspace" }` to that project's `.cogmemory/config.json` — or set `COGMEMORY_SCOPE=workspace` to make workspace the default everywhere.
+> **Default is clone-specific.** Each clone receives a UUID in `.cogmemory/config.json` and stores its database at `~/.cogmemory/projects/memory-<project-id>.db`. The UUID, not the folder name or repository origin, identifies the clone. Use `{ "scope": "global" }` or `COGMEMORY_SCOPE=global` to retain the legacy shared database, or `{ "scope": "workspace" }` for a database inside the repository.
 
 ### Paths
 
-| Scope     | Database Path                           |
-| --------- | --------------------------------------- |
-| workspace | `<workspace_root>/.cogmemory/memory.db` |
-| global    | `~/.cogmemory/global.db`                |
+| Scope     | Database Path                                  |
+| --------- | ---------------------------------------------- |
+| project   | `~/.cogmemory/projects/memory-<project-id>.db` |
+| workspace | `<workspace_root>/.cogmemory/memory.db`       |
+| global    | `~/.cogmemory/global.db`                      |
 
-> **Upgrading?** If a workspace has an existing `memory.db` but no config file, CogMemory logs a one-time stderr advisory when the new global default bypasses it — add `{ "scope": "workspace" }` to that project to keep using the old DB.
+> **Upgrading?** If a workspace has an existing `memory.db` but no config file, CogMemory logs a stderr advisory when the project default bypasses it — add `{ "scope": "workspace" }` to that project's `.cogmemory/config.json` to keep using it. Existing data in `global.db` remains available when `COGMEMORY_SCOPE=global` is explicitly selected; it is not silently repartitioned.
 
 ---
 
@@ -250,7 +252,8 @@ Every project gets a **stable, opaque slug** (UUID) stored in `.cogmemory/config
 
 - **Renames and moves are safe.** Moving a project folder does not sever access to its memories — the slug travels with the config file, and the path is metadata only.
 - **Fixed-path configs work.** IDEs/clients that cannot expand `${workspaceFolder}` can point at a single shared database path; each project's memories remain isolated by slug.
-- **Global scope is multi-project safe.** `~/.cogmemory/global.db` can hold many projects, with every read/write implicitly scoped to the active project's slug.
+- **Clone-specific project scope is the default.** Each clone opens a separate database, so concurrent clients cannot switch one shared process between unrelated project rows.
+- **Global scope remains available.** `~/.cogmemory/global.db` can hold many projects, with every read/write implicitly scoped to the active project's slug.
 
 ### `.cogmemory/config.json` & Git
 
@@ -294,6 +297,8 @@ CogMemory resolves the workspace root (and thus the project identity anchor) in 
 5. **Fallback to CWD**
 
 For most clients **no configuration is needed**: launch CogMemory with no `--workspace` and it attaches to the git repository containing the client's working directory. Every repo therefore gets its own project identity automatically.
+
+CogMemory refuses to bootstrap a project from the user's home directory or the filesystem root. This prevents a client that starts MCP servers from a generic process directory from silently storing memories under the wrong project. Configure the client with a workspace-scoped entry or set `COGMEMORY_WORKSPACE` to the literal project root when it cannot provide the correct working directory.
 
 Pin `--workspace`/`COGMEMORY_WORKSPACE` only when the identity anchor must differ from the git root — e.g. targeting a subdirectory of a monorepo as a separate project.
 

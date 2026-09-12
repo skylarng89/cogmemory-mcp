@@ -5,7 +5,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
 import { wrapHandler, jsonOk, projectPredicate } from "./utils.js";
 import { VERSION } from "../version.js";
-import type { ResolutionSource } from "../config.js";
+import type { ResolutionSource, Scope } from "../config.js";
 import type { ActiveProjectRef } from "../active-project.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -150,6 +150,7 @@ export function registerIntrospectionTools(
   workspaceRoot: string,
   activeProject: ActiveProjectRef,
   resolutionSource: ResolutionSource,
+  scope: Scope,
 ): void {
   // ── cogmemory_status ──
   server.registerTool(
@@ -177,9 +178,6 @@ export function registerIntrospectionTools(
       }) as number;
 
       const dbPath = db.name;
-      const scope: string = dbPath.includes("global.db")
-        ? "global"
-        : "workspace";
 
       const { coveragePct, lastIndexedAt } = computeIndexCoverage(
         db,
