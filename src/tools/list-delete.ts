@@ -2,9 +2,8 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type Database from "better-sqlite3";
-import { wrapHandler, projectPredicate } from "./utils.js";
-import type { ActiveProjectRef } from "../active-project.js";
+import { wrapProjectHandler, projectSchema, projectPredicate } from "./utils.js";
+import type { ProjectRuntime } from "../active-project.js";
 
 // ─── SUBSYSTEM REGISTRY ───────────────────────────────────
 // Maps a logical subsystem name to its backing table(s) and metadata so the
@@ -295,8 +294,7 @@ export const PurgeSubsystemSchema = z.object({
 
 export function registerListDeleteTools(
   server: McpServer,
-  db: Database.Database,
-  activeProject: ActiveProjectRef,
+  runtime: ProjectRuntime,
 ): void {
   // ── list_items ──
   server.registerTool(
@@ -304,12 +302,11 @@ export function registerListDeleteTools(
     {
       description:
         "Browse stored entries from any CogMemory subsystem (sessions, decisions, conventions, errors, context, changelog, plan, tasks, entities, relations, observations, specs, symbols, edges, execution_traces, codemap_annotations, file_index). Returns rows with optional filters.",
-      inputSchema: ListItemsSchema,
+      inputSchema: projectSchema(ListItemsSchema),
     },
-    wrapHandler(
-      "list_items",
-      async ({ subsystem, limit, session_id, tags }) => {
-        const projectId = activeProject.get();
+    wrapProjectHandler(
+      runtime, "list_items",
+      async ({ subsystem, limit, session_id, tags }, { db, projectId }) => {
         const meta = findTable(subsystem);
         if (!meta) {
           return {
@@ -418,10 +415,9 @@ export function registerListDeleteTools(
     {
       description:
         "Delete a single row by ID from any CogMemory subsystem that uses an integer primary key. For 'context' use delete_by_key; for 'file_index' use delete_by_path.",
-      inputSchema: DeleteItemSchema,
+      inputSchema: projectSchema(DeleteItemSchema),
     },
-    wrapHandler("delete_item", async ({ subsystem, id }) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "delete_item", async ({ subsystem, id }, { db, projectId }) => {
       const meta = findTable(subsystem);
       if (!meta) {
         return {
@@ -492,12 +488,12 @@ export function registerListDeleteTools(
     "delete_by_key",
     {
       description: "Delete a context entry by its string key",
-      inputSchema: DeleteByKeySchema,
+      inputSchema: projectSchema(DeleteByKeySchema),
     },
-    wrapHandler("delete_by_key", async ({ key }) => {
+    wrapProjectHandler(runtime, "delete_by_key", async ({ key }, { db, projectId }) => {
       const result = db
         .prepare(`DELETE FROM context WHERE key = ? AND ${projectPredicate()}`)
-        .run(key, activeProject.get());
+        .run(key, projectId);
       if (result.changes === 0) {
         return {
           content: [
@@ -531,14 +527,14 @@ export function registerListDeleteTools(
     "delete_by_path",
     {
       description: "Remove a file from the code graph file_index",
-      inputSchema: DeleteByPathSchema,
+      inputSchema: projectSchema(DeleteByPathSchema),
     },
-    wrapHandler("delete_by_path", async ({ file_path }) => {
+    wrapProjectHandler(runtime, "delete_by_path", async ({ file_path }, { db, projectId }) => {
       const result = db
         .prepare(
           `DELETE FROM file_index WHERE file_path = ? AND ${projectPredicate()}`,
         )
-        .run(file_path, activeProject.get());
+        .run(file_path, projectId);
       if (result.changes === 0) {
         return {
           content: [
@@ -573,9 +569,9 @@ export function registerListDeleteTools(
     {
       description:
         "Remove ALL rows from a single subsystem (and cascaded dependents). Requires confirm=true. Use with care — this is irreversible.",
-      inputSchema: PurgeSubsystemSchema,
+      inputSchema: projectSchema(PurgeSubsystemSchema),
     },
-    wrapHandler("purge_subsystem", async ({ subsystem, confirm }) => {
+    wrapProjectHandler(runtime, "purge_subsystem", async ({ subsystem, confirm }, { db, projectId }) => {
       if (!confirm) {
         return {
           content: [
@@ -606,7 +602,6 @@ export function registerListDeleteTools(
       }
 
       const deleted: Record<string, number> = {};
-      const projectId = activeProject.get();
       const p = projectPredicate();
       db.transaction(() => {
         const primary = meta.hasProject

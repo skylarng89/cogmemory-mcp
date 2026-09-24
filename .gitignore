@@ -1,66 +1,149 @@
-node_modules/
-dist/
-*.js.map
-*.d.ts
-!src/**/*.d.ts
+# ==============================================================================
+#                 THE ULTIMATE CLAUDECODEIGNORE CONFIGURATION
+#    Tailored for Java Spring Boot, Node.js, Frontend, Terraform & Git Baseline
+# ==============================================================================
 
-# CogMemory workspace databases
-.cogmemory/
+# ------------------------------------------------------------------------------
+# 1. COMPREHENSIVE GITIGNORE BASELINE & TEMPORARY FILES
+# ------------------------------------------------------------------------------
+# OS Metadata
+**/.DS_Store
+**/Thumbs.db
+**/Desktop.ini
 
-# Global CogMemory databases (should never be committed)
-# Located at ~/.cogmemory/ — excluded by path convention
+# Linux System Glitch & Temporary Files
+**/core.*
+**/*.swp
+**/*~
+**/*.tmp
+**/*.temp
+**/tmp/
+**/temp/
+**/.fuse_hidden*
 
-# OS files
-.DS_Store
-Thumbs.db
-.vscode/
-.sugar/
-schema.sql
-!/src/db/schema.sql
-src/version.ts
+# Compressed Archives & Large Binaries
+**/*.zip
+**/*.tar
+**/*.tar.gz
+**/*.gz
+**/*.7z
+**/*.rar
+**/*.iso
+**/*.dmg
 
-# IDE
-.idea/
-*.swp
-*.swo
-*~
+# Logs & Diagnostics
+**/*.log
+**/npm-debug.log*
+**/yarn-debug.log*
+**/yarn-error.log*
+**/pnpm-debug.log*
 
+# ------------------------------------------------------------------------------
+# 2. JAVA & SPRING BOOT SPECIFIC
+# ------------------------------------------------------------------------------
+**/target/
+**/build/
+**/out/
+**/*.class
+**/*.jar
+**/*.war
+**/*.ear
+**/*.nar
+**/.gradle/
+**/.mvn/
+**/HS_ERR_PID*
+**/.factorypath
+**/.spring-boot-devtools.properties
 
-# Logs
-*.log
-npm-debug.log*
+# ------------------------------------------------------------------------------
+# 3. NODE.JS & FRONTEND FRAMEWORKS (React, Vue, Vite, Next.js, Angular)
+# ------------------------------------------------------------------------------
+**/node_modules/
+**/dist/
+**/.next/
+**/.nuxt/
+**/.svelte-kit/
+**/.docusaurus/
+**/.cache/
+**/.serverless/
 
-# Build artifacts
-*.o
-*.obj
-*.exe
-*.dll
-*.so
-*.dylib
-*.a
-*.lib
-*.pyc
-*.pyo
-*.pyd
+# Ignore lockfiles to preserve context and token limits
+**/package-lock.json
+**/yarn.lock
+**/pnpm-lock.yaml
+**/bun.lockb
 
-# Environment files
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+# Local environment secrets and overrides
+**/*.local
+**/*.env
+**/*.env.development.local
+**/*.env.test.local
+**/*.env.production.local
 
-# Test coverage
-coverage/
-*.lcov
+# ------------------------------------------------------------------------------
+# 4. TERRAFORM & INFRASTRUCTURE AS CODE
+# ------------------------------------------------------------------------------
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfvars
+**/*.tfvars.json
+**/*.tfplan
+**/*_override.tf
+**/*_override.tf.json
+**/.terraform.lock.hcl
+**/.terraform.rc
+**/terraform.rc
 
-# Misc
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-.lerna-debug.log*
-.prettierignore
-.stylelintignore
-.eslintignore
-architecture/
+# ------------------------------------------------------------------------------
+# 5. DOCKER & CONTAINERS
+# ------------------------------------------------------------------------------
+**/docker/volumes/
+**/.docker/
+**/.dockerignore
+
+# ------------------------------------------------------------------------------
+# 6. DATABASES & LOCAL DATA REPOSITORIES
+# ------------------------------------------------------------------------------
+**/*.sql
+**/*.dump
+**/*.rdb
+**/data/db/
+**/.h2/
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+
+# ------------------------------------------------------------------------------
+# 7. TESTING & COVERAGE FOOTPRINTS
+# ------------------------------------------------------------------------------
+**/coverage/
+**/.nyc_output/
+**/.pytest_cache/
+**/htmlcov/
+**/.instrumented/
+**/docs/_build/
+**/.doxygen/
+
+# ------------------------------------------------------------------------------
+# 8. IDE, EDITORS & TOOL-SPECIFIC METADATA
+# ------------------------------------------------------------------------------
+# JetBrains (IntelliJ IDEA, WebStorm, etc.)
+**/.idea/
+**/*.iml
+**/*.iws
+**/*.ipr
+
+# Visual Studio Code
+**/.vscode/*
+!**/.vscode/extensions.json
+!**/.vscode/launch.json
+
+# Sublime / Eclipse / NetBeans
+**/*.sublime-project
+**/*.sublime-workspace
+**/.metadata/
+**/.classpath
+**/.project
+**/.settings/
+**/nbproject/

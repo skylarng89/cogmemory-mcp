@@ -257,7 +257,7 @@ Every project gets a **stable, opaque slug** (UUID) stored in `.cogmemory/config
 
 ### `.cogmemory/config.json` & Git
 
-`.cogmemory/config.json` is **gitignored by default** — each clone gets its own identity on first run. If you _want_ team-shared memory across all clones, commit the file intentionally. CogMemory logs a first-run advisory reminding you of this.
+Keep `.cogmemory/config.json` **gitignored** so each clone gets its own identity on first run. Copying or committing the file intentionally shares its UUID; starting or branching a chat does not create a new project identity.
 
 ### Project Management Tools
 
@@ -268,7 +268,7 @@ Every project gets a **stable, opaque slug** (UUID) stored in `.cogmemory/config
 | `prune_projects` | Permanently delete a project and all of its rows (requires `confirm`) |
 | `switch_project` | Re-resolve the active project at runtime from a workspace root        |
 
-`cogmemory_status` reports `workspace_root`, `root_path_hint`, `resolution_source` (`override` | `git-root` | `dotcogmemory` | `cwd-fallback`), and `active_project: { id, slug, label }`, plus per-table counts in verbose mode.
+`cogmemory_status` reports `workspace_root`, `root_path_hint`, `resolution_source` (`override` | `git-root` | `dotcogmemory` | `cwd-fallback` | `runtime-switch`), and `active_project: { id, slug, label }`, plus per-table counts in verbose mode.
 
 ### Runtime Project Switching
 
@@ -278,11 +278,45 @@ If your client pins a fixed `--workspace`/`cwd` that doesn't match the repo you'
 { "root_dir": "/mnt/repos/my-project" }
 ```
 
-The active project (and every subsequent tool call) re-scopes to that root. A missing identity slug is bootstrapped and persisted to `<root>/.cogmemory/config.json` automatically. Invalid paths fail closed — the previous project stays active.
+The target workspace's configured scope, database, UUID, numeric project ID, and root switch together after initialization succeeds. Status, indexing, and source snippets use the new root. An asynchronous call already in progress finishes using its original context. Invalid paths, corrupt configuration, or database initialization failures leave the previous context usable.
+
+### Branched Chats and Stale IDs
+
+At the start of a new or branched chat:
+
+1. Call `cogmemory_status` and compare `workspace_root` with the actual workspace. Chat history and cached numeric IDs are not authoritative.
+2. If the root differs, call `switch_project` with the intended absolute root, then fetch memory again. Do not clear the identity file to resolve a client workspace mismatch.
+3. Reuse the workspace UUID. Start a new memory session with `start_session` if needed; a chat branch is not a new project.
+
+Tool JSON responses include `project_identity: { id, slug, workspace_root }`. Tools accept optional `expected_project_id`, containing the **UUID slug**, to reject stale context before reading or writing. This is especially useful because numeric IDs can coincide across separate databases. On `PROJECT_MISMATCH`, check status and switch to the intended root before retrying. Existing calls without the optional guard remain compatible. CogMemory cannot infer a chat's intended workspace when the client supplies neither a correct launch root nor a switch request.
+
+Optional stale session/plan links on memory writes are ignored with a response warning; the memory still saves under the active project. Explicit session reads and updates are project-scoped and return a not-found response with recovery instructions for a stale session ID.
+
+### Recovering Earlier Identity Drift
+
+Earlier project-scope startup could choose `memory-A.db` and then persist UUID B inside that database and the workspace config. Startup now keeps one UUID throughout initialization, serializes concurrent initialization, and publishes config changes atomically.
+
+For existing affected stores, startup inspects project databases read-only. If exactly one stored identity matches the UUID or exact workspace root, it reuses that database **in place**, preserving its row IDs and memories. The config records `project_database_id` as the UUID from the existing database filename; this can legitimately differ from `project_id`. No database is renamed, merged, or deleted.
+
+If several candidates match, `PROJECT_IDENTITY_AMBIGUOUS` lists `{ databaseId, slug }` pairs and leaves the config unchanged. Select the intended pair in `.cogmemory/config.json`, preserving other settings:
+
+```json
+{
+  "scope": "project",
+  "project_id": "<slug from the selected candidate>",
+  "project_database_id": "<databaseId from the same candidate>"
+}
+```
+
+Then restart the MCP server, or retry `switch_project` if it is already running. The selected database must contain that UUID. Other candidate databases remain available; combining fragmented histories is a separate, explicit operation.
+
+Malformed JSON, invalid UUIDs, and invalid local scopes produce `PROJECT_CONFIG_INVALID` instead of silently replacing identity. Restore a valid config from backup. Initialization locks have a bounded wait and report `PROJECT_BUSY`; if a process crashed while holding a lock, inspect the reported directory's `owner.json`, confirm that owner has exited, remove only that abandoned lock directory, and retry. Never delete an active process's lock.
+
+Run `pnpm test:identity` for isolated regression tests of restart/branch continuity, concurrent processes, recovery, switching, stale IDs, UUID guards, and in-flight calls.
 
 ### Multi-Root / Monorepos
 
-Nearest-ancestor `.cogmemory/` wins when walking up from CWD. In monorepos, pin the intended root explicitly with `--workspace <path>` or `COGMEMORY_WORKSPACE` to avoid silently attaching to the wrong project.
+Git-root discovery takes precedence over ancestor `.cogmemory/` discovery when walking up from CWD. In monorepos, pin the intended root explicitly with `--workspace <path>` or `COGMEMORY_WORKSPACE` to avoid silently attaching to the wrong project.
 
 ---
 
@@ -302,7 +336,7 @@ CogMemory refuses to bootstrap a project from the user's home directory or the f
 
 Pin `--workspace`/`COGMEMORY_WORKSPACE` only when the identity anchor must differ from the git root — e.g. targeting a subdirectory of a monorepo as a separate project.
 
-When the resolved root diverges from where a slug was last seen (e.g. a client pinned the home directory and an unrelated repo's slug was reused), CogMemory logs a stderr advisory at boot and reports both `workspace_root` and `root_path_hint` in `cogmemory_status` so the mismatch is visible before any memories are written.
+`cogmemory_status` reports the active `workspace_root`, `root_path_hint`, database path, and UUID. Invalid explicit workspace overrides fail rather than falling back to an unrelated directory.
 
 ---
 

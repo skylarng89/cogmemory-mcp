@@ -2,9 +2,8 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type Database from "better-sqlite3";
-import { wrapHandler, projectPredicate } from "./utils.js";
-import type { ActiveProjectRef } from "../active-project.js";
+import { wrapProjectHandler, projectSchema, projectPredicate } from "./utils.js";
+import type { ProjectRuntime } from "../active-project.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -63,8 +62,7 @@ export const SearchKnowledgeSchema = z.object({
 
 export function registerKnowledgeGraphTools(
   server: McpServer,
-  db: Database.Database,
-  activeProject: ActiveProjectRef,
+  runtime: ProjectRuntime,
 ): void {
   // ── create_entity ──
   server.registerTool(
@@ -72,10 +70,9 @@ export function registerKnowledgeGraphTools(
     {
       description:
         "Add an entity to the knowledge graph (deduped on name+type)",
-      inputSchema: CreateEntitySchema,
+      inputSchema: projectSchema(CreateEntitySchema),
     },
-    wrapHandler("create_entity", async ({ name, type }) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "create_entity", async ({ name, type }, { db, projectId }) => {
       const stmt = db.prepare(`
         INSERT INTO entities (project_id, name, type)
         VALUES (?, ?, ?)
@@ -110,12 +107,11 @@ export function registerKnowledgeGraphTools(
     "create_relation",
     {
       description: "Link two entities with a typed relation",
-      inputSchema: CreateRelationSchema,
+      inputSchema: projectSchema(CreateRelationSchema),
     },
-    wrapHandler(
-      "create_relation",
-      async ({ from_entity_id, to_entity_id, relation_type }) => {
-        const projectId = activeProject.get();
+    wrapProjectHandler(
+      runtime, "create_relation",
+      async ({ from_entity_id, to_entity_id, relation_type }, { db, projectId }) => {
         // Validate both entities exist (and belong to this project)
         const fromEntity = db
           .prepare(
@@ -188,10 +184,9 @@ export function registerKnowledgeGraphTools(
     "add_observation",
     {
       description: "Attach a fact/observation to a knowledge graph entity",
-      inputSchema: AddObservationSchema,
+      inputSchema: projectSchema(AddObservationSchema),
     },
-    wrapHandler("add_observation", async ({ entity_id, content }) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "add_observation", async ({ entity_id, content }, { db, projectId }) => {
       // Validate entity exists (and belongs to this project)
       const entity = db
         .prepare(
@@ -240,18 +235,17 @@ export function registerKnowledgeGraphTools(
     {
       description:
         "Query the knowledge graph: entities, relations, and observations by name, type, or text",
-      inputSchema: SearchKnowledgeSchema,
+      inputSchema: projectSchema(SearchKnowledgeSchema),
     },
-    wrapHandler(
-      "search_knowledge",
+    wrapProjectHandler(
+      runtime, "search_knowledge",
       async ({
         entity_name,
         entity_type,
         relation_type,
         observation_text,
         limit,
-      }) => {
-        const projectId = activeProject.get();
+      }, { db, projectId }) => {
         const lim = limit ?? 50;
         const results: Record<string, unknown[]> = {};
 

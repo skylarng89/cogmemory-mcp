@@ -2,9 +2,8 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type Database from "better-sqlite3";
-import { wrapHandler, projectPredicate } from "./utils.js";
-import type { ActiveProjectRef } from "../active-project.js";
+import { wrapProjectHandler, projectSchema, projectPredicate } from "./utils.js";
+import type { ProjectRuntime } from "../active-project.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -26,19 +25,18 @@ export const GetSessionSummarySchema = z.object({
 
 export function registerSessionTools(
   server: McpServer,
-  db: Database.Database,
-  activeProject: ActiveProjectRef,
+  runtime: ProjectRuntime,
 ): void {
   // ── start_session ──
   server.registerTool(
     "start_session",
     {
       description: "Begin a new work session (returns session ID)",
-      inputSchema: StartSessionSchema,
+      inputSchema: projectSchema(StartSessionSchema),
     },
-    wrapHandler("start_session", async () => {
+    wrapProjectHandler(runtime, "start_session", async (_params, { db, projectId }) => {
       const stmt = db.prepare("INSERT INTO sessions (project_id) VALUES (?)");
-      const result = stmt.run(activeProject.get());
+      const result = stmt.run(projectId);
       return {
         content: [
           {
@@ -59,15 +57,15 @@ export function registerSessionTools(
     "end_session",
     {
       description: "Close a work session and optionally store a summary",
-      inputSchema: EndSessionSchema,
+      inputSchema: projectSchema(EndSessionSchema),
     },
-    wrapHandler("end_session", async ({ id, summary }) => {
+    wrapProjectHandler(runtime, "end_session", async ({ id, summary }, { db, projectId }) => {
       const stmt = db.prepare(`
         UPDATE sessions
         SET ended_at = datetime('now'), summary = ?
-        WHERE id = ?
+        WHERE id = ? AND project_id = ?
       `);
-      const result = stmt.run(summary ?? null, id);
+      const result = stmt.run(summary ?? null, id, projectId);
       if (result.changes === 0) {
         return {
           content: [
@@ -75,7 +73,7 @@ export function registerSessionTools(
               type: "text" as const,
               text: JSON.stringify({
                 success: false,
-                message: `Session ${id} not found`,
+                message: `Session ${id} not found in the active project. Call start_session or list_items with subsystem sessions.`,
               }),
             },
           ],
@@ -101,13 +99,12 @@ export function registerSessionTools(
     {
       description:
         "Recall what happened in a previous session, including its decisions, errors, and changelog entries",
-      inputSchema: GetSessionSummarySchema,
+      inputSchema: projectSchema(GetSessionSummarySchema),
     },
-    wrapHandler("get_session_summary", async ({ id }) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "get_session_summary", async ({ id }, { db, projectId }) => {
       const session = db
-        .prepare("SELECT * FROM sessions WHERE id = ?")
-        .get(id) as Record<string, unknown> | undefined;
+        .prepare("SELECT * FROM sessions WHERE id = ? AND project_id = ?")
+        .get(id, projectId) as Record<string, unknown> | undefined;
 
       if (!session) {
         return {
@@ -116,7 +113,7 @@ export function registerSessionTools(
               type: "text" as const,
               text: JSON.stringify({
                 success: false,
-                message: `Session ${id} not found`,
+                message: `Session ${id} not found in the active project. Call start_session or list_items with subsystem sessions.`,
               }),
             },
           ],

@@ -2,14 +2,13 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type Database from "better-sqlite3";
 import {
-  wrapHandler,
+  wrapProjectHandler, projectSchema,
   resolveSessionId,
   resolvePlanId,
   projectPredicate,
 } from "./utils.js";
-import type { ActiveProjectRef } from "../active-project.js";
+import type { ProjectRuntime } from "../active-project.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -54,25 +53,24 @@ export const UpdateTaskStatusSchema = z.object({
 
 export function registerPlanTasksTools(
   server: McpServer,
-  db: Database.Database,
-  activeProject: ActiveProjectRef,
+  runtime: ProjectRuntime,
 ): void {
   // ── add_plan_item ──
   server.registerTool(
     "add_plan_item",
     {
       description: "Add a roadmap/plan item",
-      inputSchema: AddPlanItemSchema,
+      inputSchema: projectSchema(AddPlanItemSchema),
     },
-    wrapHandler(
-      "add_plan_item",
-      async ({ phase, title, description, status, order_index }) => {
+    wrapProjectHandler(
+      runtime, "add_plan_item",
+      async ({ phase, title, description, status, order_index }, { db, projectId }) => {
         const stmt = db.prepare(`
         INSERT INTO plan (project_id, phase, title, description, status, order_index)
         VALUES (?, ?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
-          activeProject.get(),
+          projectId,
           phase ?? null,
           title,
           description ?? null,
@@ -100,14 +98,14 @@ export function registerPlanTasksTools(
     "update_plan_status",
     {
       description: "Update the status of a plan item",
-      inputSchema: UpdatePlanStatusSchema,
+      inputSchema: projectSchema(UpdatePlanStatusSchema),
     },
-    wrapHandler("update_plan_status", async ({ id, status }) => {
+    wrapProjectHandler(runtime, "update_plan_status", async ({ id, status }, { db, projectId }) => {
       const stmt = db.prepare(`
         UPDATE plan SET status = ?, updated_at = datetime('now')
         WHERE id = ? AND ${projectPredicate()}
       `);
-      const result = stmt.run(status, id, activeProject.get());
+      const result = stmt.run(status, id, projectId);
       if (result.changes === 0) {
         return {
           content: [
@@ -141,19 +139,19 @@ export function registerPlanTasksTools(
     {
       description:
         "Create an actionable task, optionally linked to a plan item",
-      inputSchema: CreateTaskSchema,
+      inputSchema: projectSchema(CreateTaskSchema),
     },
-    wrapHandler(
-      "create_task",
-      async ({ plan_id, session_id, title, description, status, tags }) => {
+    wrapProjectHandler(
+      runtime, "create_task",
+      async ({ plan_id, session_id, title, description, status, tags }, { db, projectId }) => {
         const stmt = db.prepare(`
         INSERT INTO tasks (project_id, plan_id, session_id, title, description, status, tags)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
-          activeProject.get(),
-          resolvePlanId(db, plan_id),
-          resolveSessionId(db, session_id),
+          projectId,
+          resolvePlanId(db, plan_id, projectId),
+          resolveSessionId(db, session_id, projectId),
           title,
           description ?? null,
           status ?? "todo",
@@ -180,14 +178,14 @@ export function registerPlanTasksTools(
     "update_task_status",
     {
       description: "Update the status of a task",
-      inputSchema: UpdateTaskStatusSchema,
+      inputSchema: projectSchema(UpdateTaskStatusSchema),
     },
-    wrapHandler("update_task_status", async ({ id, status }) => {
+    wrapProjectHandler(runtime, "update_task_status", async ({ id, status }, { db, projectId }) => {
       const stmt = db.prepare(`
         UPDATE tasks SET status = ?, updated_at = datetime('now')
         WHERE id = ? AND ${projectPredicate()}
       `);
-      const result = stmt.run(status, id, activeProject.get());
+      const result = stmt.run(status, id, projectId);
       if (result.changes === 0) {
         return {
           content: [

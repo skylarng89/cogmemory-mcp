@@ -3,8 +3,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler, resolveSessionId, projectPredicate } from "./utils.js";
-import type { ActiveProjectRef } from "../active-project.js";
+import { wrapProjectHandler, projectSchema, resolveSessionId, projectPredicate } from "./utils.js";
+import type { ProjectRuntime } from "../active-project.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -173,26 +173,25 @@ function filteredQuery(
 
 export function registerMemoryTools(
   server: McpServer,
-  db: Database.Database,
-  activeProject: ActiveProjectRef,
+  runtime: ProjectRuntime,
 ): void {
   // ── remember_decision ──
   server.registerTool(
     "remember_decision",
     {
       description: "Log a decision with rationale and optional tags",
-      inputSchema: RememberDecisionSchema,
+      inputSchema: projectSchema(RememberDecisionSchema),
     },
-    wrapHandler(
-      "remember_decision",
-      async ({ title, rationale, tags, session_id }) => {
+    wrapProjectHandler(
+      runtime, "remember_decision",
+      async ({ title, rationale, tags, session_id }, { db, projectId }) => {
         const stmt = db.prepare(`
         INSERT INTO decisions (project_id, session_id, title, rationale, tags)
         VALUES (?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
-          activeProject.get(),
-          resolveSessionId(db, session_id),
+          projectId,
+          resolveSessionId(db, session_id, projectId),
           title,
           rationale ?? null,
           tags ?? null,
@@ -219,11 +218,11 @@ export function registerMemoryTools(
     {
       description:
         "Log or update a convention (design token, pattern, style, naming)",
-      inputSchema: RememberConventionSchema,
+      inputSchema: projectSchema(RememberConventionSchema),
     },
-    wrapHandler(
-      "remember_convention",
-      async ({ category, key, value, description, tags }) => {
+    wrapProjectHandler(
+      runtime, "remember_convention",
+      async ({ category, key, value, description, tags }, { db, projectId }) => {
         const stmt = db.prepare(`
         INSERT INTO conventions (project_id, category, key, value, description, tags)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -234,7 +233,7 @@ export function registerMemoryTools(
           updated_at = datetime('now')
       `);
         const result = stmt.run(
-          activeProject.get(),
+          projectId,
           category,
           key,
           value ?? null,
@@ -263,24 +262,24 @@ export function registerMemoryTools(
     {
       description:
         "Record an error with its signature, description, and resolution",
-      inputSchema: LogErrorSchema,
+      inputSchema: projectSchema(LogErrorSchema),
     },
-    wrapHandler(
-      "log_error",
+    wrapProjectHandler(
+      runtime, "log_error",
       async ({
         error_signature,
         description,
         resolution,
         tags,
         session_id,
-      }) => {
+      }, { db, projectId }) => {
         const stmt = db.prepare(`
         INSERT INTO errors (project_id, session_id, error_signature, description, resolution, tags)
         VALUES (?, ?, ?, ?, ?, ?)
       `);
         const result = stmt.run(
-          activeProject.get(),
-          resolveSessionId(db, session_id),
+          projectId,
+          resolveSessionId(db, session_id, projectId),
           error_signature,
           description ?? null,
           resolution ?? null,
@@ -307,9 +306,9 @@ export function registerMemoryTools(
     "set_active_context",
     {
       description: "Set or update the current active context (upsert by key)",
-      inputSchema: SetActiveContextSchema,
+      inputSchema: projectSchema(SetActiveContextSchema),
     },
-    wrapHandler("set_active_context", async ({ key, value }) => {
+    wrapProjectHandler(runtime, "set_active_context", async ({ key, value }, { db, projectId }) => {
       const stmt = db.prepare(`
         INSERT INTO context (project_id, key, value, updated_at)
         VALUES (?, ?, ?, datetime('now'))
@@ -317,7 +316,7 @@ export function registerMemoryTools(
           value = excluded.value,
           updated_at = datetime('now')
       `);
-      stmt.run(activeProject.get(), key, value ?? null);
+      stmt.run(projectId, key, value ?? null);
       return {
         content: [
           {
@@ -337,14 +336,14 @@ export function registerMemoryTools(
     "get_active_context",
     {
       description: "Read the current value of a context key",
-      inputSchema: GetActiveContextSchema,
+      inputSchema: projectSchema(GetActiveContextSchema),
     },
-    wrapHandler("get_active_context", async ({ key }) => {
+    wrapProjectHandler(runtime, "get_active_context", async ({ key }, { db, projectId }) => {
       const row = db
         .prepare(
           `SELECT key, value, updated_at FROM context WHERE key = ? AND ${projectPredicate()}`,
         )
-        .get(key, activeProject.get()) as
+        .get(key, projectId) as
         | { key: string; value: string | null; updated_at: string }
         | undefined;
 
@@ -378,16 +377,16 @@ export function registerMemoryTools(
     "log_change",
     {
       description: "Append an entry to the changelog (what happened)",
-      inputSchema: LogChangeSchema,
+      inputSchema: projectSchema(LogChangeSchema),
     },
-    wrapHandler("log_change", async ({ summary, ref, session_id }) => {
+    wrapProjectHandler(runtime, "log_change", async ({ summary, ref, session_id }, { db, projectId }) => {
       const stmt = db.prepare(`
         INSERT INTO changelog (project_id, session_id, summary, ref)
         VALUES (?, ?, ?, ?)
       `);
       const result = stmt.run(
-        activeProject.get(),
-        resolveSessionId(db, session_id),
+        projectId,
+        resolveSessionId(db, session_id, projectId),
         summary,
         ref ?? null,
       );
@@ -412,11 +411,10 @@ export function registerMemoryTools(
     {
       description:
         "Unified search across decisions, conventions, errors, and changelog by text, tags, session, or date range",
-      inputSchema: RecallSchema,
+      inputSchema: projectSchema(RecallSchema),
     },
-    wrapHandler("recall", async ({ text, tags, session_id, since, limit }) => {
+    wrapProjectHandler(runtime, "recall", async ({ text, tags, session_id, since, limit }, { db, projectId }) => {
       const lim = limit ?? 20;
-      const projectId = activeProject.get();
       const results: Record<string, unknown[]> = {};
 
       if (text) {

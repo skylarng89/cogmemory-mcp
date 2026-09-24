@@ -1,47 +1,33 @@
-// CogMemory MCP — Database connection with pragma setup
-
+// CogMemory MCP — Database connections with serialized initialization.
 import Database from "better-sqlite3";
+import { resolve } from "node:path";
 import { runMigrations } from "./migration-runner.js";
+import { withFileLock } from "../file-lock.js";
 
-let db: Database.Database | null = null;
+const connections = new Set<Database.Database>();
 
-/**
- * Open (or return existing) database connection with WAL + foreign_keys pragmas.
- * Runs versioned schema migrations on every open (pending migrations only).
- */
+/** A connection is published only after migrations succeed. */
 export function openDatabase(dbPath: string): Database.Database {
-  if (db) {
-    return db;
-  }
-
-  db = new Database(dbPath);
-
-  // Set pragmas on every connection open
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-
-  // Run versioned migrations (applies pending migrations only; idempotent for up-to-date DBs)
-  runMigrations(db, dbPath);
-
-  return db;
+  const path = resolve(dbPath);
+  return withFileLock(`${path}.init.lock`, () => {
+    const db = new Database(path);
+    try {
+      db.pragma("journal_mode = WAL");
+      db.pragma("foreign_keys = ON");
+      runMigrations(db, path);
+      connections.add(db);
+      return db;
+    } catch (error) {
+      db.close();
+      throw error;
+    }
+  });
 }
 
-/**
- * Get the current database connection (throws if not opened).
- */
-export function getDatabase(): Database.Database {
-  if (!db) {
-    throw new Error("Database not initialized. Call openDatabase() first.");
-  }
-  return db;
-}
-
-/**
- * Close the current database connection.
- */
-export function closeDatabase(): void {
-  if (db) {
-    db.close();
-    db = null;
+export function closeDatabase(connection?: Database.Database): void {
+  for (const db of connections) {
+    if (connection && connection !== db) continue;
+    if (db.open) db.close();
+    connections.delete(db);
   }
 }

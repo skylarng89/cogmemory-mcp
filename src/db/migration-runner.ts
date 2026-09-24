@@ -79,7 +79,7 @@ function shouldBackup(current: number, files: MigrationFile[]): boolean {
  *
  * - For user_version=0 DBs (pre-migration-system), creates a backup file.
  * - Each migration runs inside a single transaction (BEGIN…COMMIT).
- * - On failure: ROLLBACK, stderr error, process.exit(1).
+ * - On failure: ROLLBACK, stderr error, throw to the caller.
  * - FTS rebuilds are inside 001_baseline.sql only (not on every open).
  */
 export function runMigrations(db: Database.Database, dbPath: string): void {
@@ -184,7 +184,7 @@ function applySingleMigration(
     // SQLite builds. Check if migration actually succeeded.
     const check = db.pragma("user_version", { simple: true }) as number;
     if (check < file.version) {
-      // Real failure — exit so the user can recover from the backup
+      // Real failure — throw so a failed project switch preserves the active context
       console.error(
         `[migrate] CRITICAL: Migration ${file.name} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -196,7 +196,7 @@ function applySingleMigration(
           `[migrate] Recovery: restore from backup file: ${dbPath}.backup-pre-migrate-*`,
         );
       }
-      process.exit(1);
+      throw err;
     }
     // If user_version advanced, the migration succeeded despite the
     // warning. Continue.
@@ -287,7 +287,7 @@ function healSkippedMigration009(
       `[migrate] CRITICAL: Self-heal failed — migration 009 constraints still missing ` +
         `(user_version=${finalVersion}). Restore from a backup file: ${dbPath}.backup-pre-migrate-*`,
     );
-    process.exit(1);
+    throw new Error("Migration 009 self-heal failed; restore the database backup.");
   }
   console.error(
     `  [migrate] Self-heal complete: migration 009 re-applied (v${MIGRATION_009_REWIND_VERSION} → v${finalVersion}).`,

@@ -6,11 +6,16 @@ import {
   writeFileSync,
   mkdirSync,
   statSync,
+  renameSync,
+  readdirSync,
+  unlinkSync,
+  realpathSync,
 } from "node:fs";
 import { join, resolve, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
-import type Database from "better-sqlite3";
+import Database from "better-sqlite3";
+import { withFileLock } from "./file-lock.js";
 
 export type Scope = "workspace" | "global" | "project";
 
@@ -25,6 +30,8 @@ interface ConfigFile {
   disable_update_check?: boolean;
   /** Opaque UUID slug identifying this project — the primary identity key. */
   project_id?: string;
+  /** Existing database filename UUID, when recovering pre-fix identity drift. */
+  project_database_id?: string;
 }
 
 export interface ProjectIdentity {
@@ -45,60 +52,41 @@ export interface ProjectIdentity {
  * 3. User-level `~/.cogmemory/config.json` (scope/settings fallback)
  * 4. Default: `project` (one database per clone under ~/.cogmemory/projects/)
  */
-export function resolveConfig(workspaceRoot: string): Config {
-  // 1. Check .cogmemory/config.json in the workspace root
-  const configPath = join(workspaceRoot, ".cogmemory", "config.json");
-  if (existsSync(configPath)) {
-    try {
-      const raw = readFileSync(configPath, "utf-8");
-      const parsed: ConfigFile = JSON.parse(raw);
-      if (parsed.scope === "global") {
-        return buildGlobalConfig(workspaceRoot);
-      }
-      if (parsed.scope === "project") {
-        return buildProjectConfig(workspaceRoot);
-      }
-      if (parsed.scope === "workspace") {
-        return buildWorkspaceConfig(workspaceRoot);
-      }
-    } catch {
-      // Config file is malformed — fall through to next priority
-    }
-  }
+export function resolveConfig(workspaceRoot: string, dataDir = join(homedir(), ".cogmemory")): Config {
+  workspaceRoot = validateWorkspaceRoot(workspaceRoot);
+  const local = readConfigFile(workspaceRoot);
+  if (local.scope === "global") return buildGlobalConfig(workspaceRoot, dataDir);
+  if (local.scope === "workspace") return buildWorkspaceConfig(workspaceRoot);
+  if (local.scope === "project") return buildProjectConfig(workspaceRoot, dataDir);
 
   // 2. Environment variable
   const envScope = process.env.COGMEMORY_SCOPE;
   if (envScope === "global") {
-    return buildGlobalConfig(workspaceRoot);
+    return buildGlobalConfig(workspaceRoot, dataDir);
   }
   if (envScope === "workspace") {
     return buildWorkspaceConfig(workspaceRoot);
   }
   if (envScope === "project") {
-    return buildProjectConfig(workspaceRoot);
+    return buildProjectConfig(workspaceRoot, dataDir);
   }
 
   // 3. User-level fallback: ~/.cogmemory/config.json acts as a global
   //    settings file (scope only — never project identity, per ADR-8).
-  const userConfigPath = join(homedir(), ".cogmemory", "config.json");
+  const userConfigPath = join(dataDir, "config.json");
   if (existsSync(userConfigPath)) {
+    let settings: ConfigFile;
     try {
-      const parsed: ConfigFile = JSON.parse(
-        readFileSync(userConfigPath, "utf-8"),
-      );
-      if (parsed.scope === "workspace") {
-        return buildWorkspaceConfig(workspaceRoot);
-      }
-      if (parsed.scope === "project") {
-        return buildProjectConfig(workspaceRoot);
-      }
-      if (parsed.scope === "global") {
-        return buildGlobalConfig(workspaceRoot);
-      }
-      // An absent scope in the user file → project default below
-    } catch {
-      // Malformed user config — fall through to default
+      settings = JSON.parse(readFileSync(userConfigPath, "utf-8"));
+      if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new Error("expected object");
+      if (settings.scope !== undefined && !["workspace", "project", "global"].includes(settings.scope)) throw new Error("invalid scope");
+    } catch (error) {
+      throw new Error(`PROJECT_CONFIG_INVALID: ${userConfigPath}: ${error instanceof Error ? error.message : error}. Restore valid scope settings before opening memory.`);
     }
+    // Do not catch builder errors and silently fall back to another scope.
+    if (settings.scope === "workspace") return buildWorkspaceConfig(workspaceRoot);
+    if (settings.scope === "project") return buildProjectConfig(workspaceRoot, dataDir);
+    if (settings.scope === "global") return buildGlobalConfig(workspaceRoot, dataDir);
   }
 
   // 4. Default: one database per clone under ~/.cogmemory/projects/.
@@ -110,7 +98,7 @@ export function resolveConfig(workspaceRoot: string): Config {
       `[cogmemory] Defaulting to project scope; this workspace has an existing legacy DB at ${legacyWsDb}. Add {"scope": "workspace"} to ${join(workspaceRoot, ".cogmemory", "config.json")} to keep using it.`,
     );
   }
-  return buildProjectConfig(workspaceRoot);
+  return buildProjectConfig(workspaceRoot, dataDir);
 }
 
 function buildWorkspaceConfig(workspaceRoot: string): Config {
@@ -130,8 +118,7 @@ function buildWorkspaceConfig(workspaceRoot: string): Config {
  * pure scope/settings file and prevents one stale slug from being reused as
  * the identity for every project the user opens.
  */
-function buildGlobalConfig(workspaceRoot: string): Config {
-  const dir = join(homedir(), ".cogmemory");
+function buildGlobalConfig(workspaceRoot: string, dir: string): Config {
   mkdirSync(dir, { recursive: true });
   return {
     scope: "global",
@@ -146,15 +133,62 @@ function buildGlobalConfig(workspaceRoot: string): Config {
  * the filename so the path remains stable when the project is renamed or
  * moved, and no untrusted project label can become part of a filesystem path.
  */
-function buildProjectConfig(workspaceRoot: string): Config {
-  const projectId = ensureProjectSlug(workspaceRoot);
-  const dir = join(homedir(), ".cogmemory", "projects");
+function buildProjectConfig(workspaceRoot: string, dataDir: string): Config {
+  const dir = join(dataDir, "projects");
   mkdirSync(dir, { recursive: true });
-  return {
-    scope: "project",
-    dbPath: join(dir, `memory-${projectId}.db`),
-    workspaceRoot,
-  };
+  return withWorkspaceLock(workspaceRoot, () => {
+    const config = readConfigFile(workspaceRoot);
+    let slug = config.project_id;
+    const explicit = config.project_database_id;
+    const candidates: Array<{ databaseId: string; slug: string }> = [];
+    for (const entry of readdirSync(dir)) {
+      const match = /^memory-([0-9a-f-]+)\.db$/i.exec(entry);
+      if (!match || !PROJECT_ID_PATTERN.test(match[1])) continue;
+      if (explicit && match[1] !== explicit) continue;
+      let candidate: Database.Database | undefined;
+      try {
+        candidate = new Database(join(dir, entry), { readonly: true, fileMustExist: true });
+        const rows = candidate.prepare(
+          "SELECT slug, root_path_hint FROM projects WHERE slug != 'legacy-unassigned'",
+        ).all() as Array<{ slug: string; root_path_hint: string | null }>;
+        if (match[1] === (explicit ?? slug) && rows.length &&
+            !rows.some(row => row.slug === slug || (!explicit && row.root_path_hint === workspaceRoot))) {
+          throw new Error(`PROJECT_IDENTITY_MISMATCH: selected database ${entry} contains different identities: ${JSON.stringify(rows)}. Restore the intended project_id/project_database_id pair; no memories were changed.`);
+        }
+        for (const row of rows) {
+          if (row.slug === slug || (!explicit && row.root_path_hint === workspaceRoot)) {
+            candidates.push({ databaseId: match[1], slug: row.slug });
+          }
+        }
+      } catch (error) {
+        // Never silently replace the selected database when it cannot be inspected.
+        if (match[1] === (explicit ?? slug)) throw error;
+      } finally {
+        candidate?.close();
+      }
+    }
+    if (candidates.length > 1) {
+      throw new Error(
+        `PROJECT_IDENTITY_AMBIGUOUS: multiple memory stores match ${workspaceRoot}: ` +
+        JSON.stringify(candidates) + ". Select project_database_id and project_id in .cogmemory/config.json from the intended candidate; all databases are preserved.",
+      );
+    }
+    const recovered = candidates[0];
+    if (explicit && (!recovered || recovered.slug !== slug)) {
+      throw new Error("PROJECT_IDENTITY_MISMATCH: project_database_id must select an existing database containing project_id. Existing memories were not changed.");
+    }
+    if (recovered) {
+      slug = recovered.slug;
+      const next = { ...config, project_id: slug, project_database_id: recovered.databaseId };
+      if (config.project_id !== slug || config.project_database_id !== recovered.databaseId) {
+        writeConfigFile(workspaceRoot, next);
+      }
+      return { scope: "project", dbPath: join(dir, `memory-${recovered.databaseId}.db`), workspaceRoot };
+    }
+    slug ??= randomUUID();
+    if (config.project_id !== slug) writeConfigFile(workspaceRoot, { ...config, project_id: slug });
+    return { scope: "project", dbPath: join(dir, `memory-${slug}.db`), workspaceRoot };
+  });
 }
 
 // ─── Workspace root helpers ───────────────────────────────
@@ -209,20 +243,20 @@ function findGitRoot(start: string): string | null {
 /**
  * Try to resolve and validate a path. Returns it if it exists, null otherwise.
  */
-function tryPath(path: string, label: string): string | null {
-  const resolved = resolve(path);
-  if (existsSync(resolved)) return resolved;
-  console.error(
-    `Warning: ${label} path does not exist: ${resolved}, falling back`,
-  );
-  return null;
+export function validateWorkspaceRoot(path: string): string {
+  const root = realpathSync(resolve(path));
+  if (!statSync(root).isDirectory() || root === realpathSync(homedir()) || dirname(root) === root) {
+    throw new Error(`Invalid project workspace: ${path}. Use an existing project directory, not home or filesystem root.`);
+  }
+  return root;
 }
 
 export type ResolutionSource =
   | "override"
   | "git-root"
   | "dotcogmemory"
-  | "cwd-fallback";
+  | "cwd-fallback"
+  | "runtime-switch";
 
 export interface WorkspaceResolution {
   root: string;
@@ -239,14 +273,13 @@ export interface WorkspaceResolution {
  */
 export function resolveWorkspaceRoot(argv: string[]): WorkspaceResolution {
   const argIdx = argv.indexOf("--workspace");
-  if (argIdx !== -1 && argv[argIdx + 1]) {
-    const r = tryPath(argv[argIdx + 1], "--workspace");
-    if (r) return { root: r, source: "override" };
+  if (argIdx !== -1) {
+    if (!argv[argIdx + 1]) throw new Error("--workspace requires a project directory");
+    return { root: validateWorkspaceRoot(argv[argIdx + 1]), source: "override" };
   }
 
   if (process.env.COGMEMORY_WORKSPACE) {
-    const r = tryPath(process.env.COGMEMORY_WORKSPACE, "COGMEMORY_WORKSPACE");
-    if (r) return { root: r, source: "override" };
+    return { root: validateWorkspaceRoot(process.env.COGMEMORY_WORKSPACE), source: "override" };
   }
 
   const gitRoot = findGitRoot(".");
@@ -277,199 +310,89 @@ function configFilePath(workspaceRoot: string): string {
 const PROJECT_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function ensureProjectSlug(workspaceRoot: string): string {
-  const existing = readConfigFile(workspaceRoot).project_id;
-  if (existing && PROJECT_ID_PATTERN.test(existing)) {
-    return existing;
-  }
-
-  const slug = randomUUID();
-  if (existing) {
-    console.error(
-      `[cogmemory] Invalid project_id in ${configFilePath(workspaceRoot)} — generating a new clone identity`,
-    );
-  }
-  persistSlug(workspaceRoot, slug);
-  return readConfigFile(workspaceRoot).project_id ?? slug;
+export function readProjectBinding(workspaceRoot: string): string {
+  const config = readConfigFile(workspaceRoot);
+  return JSON.stringify([config.project_id, config.project_database_id, config.scope]);
 }
 
 function readConfigFile(workspaceRoot: string): ConfigFile {
   const path = configFilePath(workspaceRoot);
-  if (!existsSync(path)) return {};
-  try {
-    return JSON.parse(readFileSync(path, "utf-8")) as ConfigFile;
-  } catch {
-    console.error(
-      "Warning: .cogmemory/config.json is malformed — regenerating project identity",
-    );
-    return {};
+  let raw: string;
+  try { raw = readFileSync(path, "utf-8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
   }
-}
-
-/**
- * Persist the slug into .cogmemory/config.json using an exclusive create
- * (flag: "wx") so two processes racing on first-run converge on one slug:
- * the loser re-reads the winner's file and adopts its slug (ADR-6).
- */
-function persistSlug(workspaceRoot: string, slug: string): void {
-  const dir = join(workspaceRoot, ".cogmemory");
-  mkdirSync(dir, { recursive: true });
-  const path = configFilePath(workspaceRoot);
-
-  const existing = readConfigFile(workspaceRoot);
-  const merged: ConfigFile = { ...existing, project_id: slug };
-  const body = JSON.stringify(merged, null, 2) + "\n";
-
-  // Fast path: file already exists and already has our slug — just rewrite it.
-  if (existsSync(path)) {
-    try {
-      writeFileSync(path, body, "utf-8");
-      return;
-    } catch {
-      // Fall through to exclusive-create path below
-    }
-  }
-
+  let config: ConfigFile;
   try {
-    // Exclusive create wins the race if the file does not exist yet.
-    writeFileSync(path, body, { flag: "wx", encoding: "utf-8" });
-    console.error(
-      "[cogmemory] Created .cogmemory/config.json — consider adding '.cogmemory/' to .gitignore " +
-        "so each clone gets its own project identity (commit it only for intentional team-shared memory).",
-    );
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-      // Another process created it first — adopt their slug.
-      const winner = readConfigFile(workspaceRoot);
-      if (winner.project_id && winner.project_id !== slug) {
-        console.error(
-          `[cogmemory] Concurrent bootstrap detected — adopting existing project slug ${winner.project_id}`,
-        );
+    config = JSON.parse(raw);
+    if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("expected object");
+    for (const key of ["project_id", "project_database_id"] as const) {
+      if (config[key] !== undefined && (typeof config[key] !== "string" || !PROJECT_ID_PATTERN.test(config[key]!))) {
+        throw new Error(`invalid ${key}`);
       }
-      return;
     }
-    throw err;
+    if (config.scope !== undefined && !["project", "workspace", "global"].includes(config.scope)) throw new Error("invalid scope");
+  } catch (error) {
+    throw new Error(`PROJECT_CONFIG_INVALID: ${path}: ${error instanceof Error ? error.message : error}. Restore the valid config/UUID; existing memory and config are preserved.`);
+  }
+  return config;
+}
+
+function withWorkspaceLock<T>(root: string, work: () => T): T {
+  mkdirSync(join(root, ".cogmemory"), { recursive: true });
+  return withFileLock(join(root, ".cogmemory", "identity.lock"), work);
+}
+
+function writeConfigFile(root: string, config: ConfigFile): void {
+  const path = configFilePath(root);
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify(config, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+    renameSync(temporary, path);
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
   }
 }
 
-/**
- * Resolve the active project identity once per server process (ADR-3).
- *
- * Priority:
- * 1. `project_id` slug in `.cogmemory/config.json` → look up in projects table
- * 2. Workspace-scope DB with the synthesized 'legacy-unassigned' row → adopt it
- *    (this is a pre-migration workspace DB; it belongs to this project)
- * 3. Global-scope DB → bootstrap a fresh project row (legacy rows stay in
- *    the 'legacy-unassigned' bucket)
- * 4. Otherwise → generate a new UUID slug, insert a projects row, persist it
- */
+/** Keep the persisted UUID authoritative; serialize bootstrap across MCP processes. */
 export function resolveProjectIdentity(
   workspaceRoot: string,
   db: Database.Database,
   scope: Scope,
 ): ProjectIdentity {
-  const label = basename(workspaceRoot) || "workspace";
-  const rootHint = resolve(workspaceRoot);
-
-  const ensureProjectsTable = () => {
-    // Guard for DBs opened before migration 008 ran (should not normally
-    // happen since migrations run at open, but keeps this defensive).
-    const cols = db.pragma("table_info(projects)") as Array<{ name: string }>;
-    if (cols.length === 0) {
-      throw new Error(
-        "projects table missing — schema migration 008 did not run",
-      );
+  return withWorkspaceLock(workspaceRoot, () => {
+    const config = readConfigFile(workspaceRoot);
+    const rows = db.prepare("SELECT id, slug, label, root_path_hint FROM projects WHERE slug != 'legacy-unassigned'")
+      .all() as Array<{ id: number; slug: string; label: string | null; root_path_hint?: string }>;
+    // Recover a lost config only from unambiguous stored identity evidence.
+    const prior = scope === "workspace" ? rows : rows.filter(row => row.root_path_hint === workspaceRoot);
+    if (!config.project_id && prior.length > 1) {
+      throw new Error(`PROJECT_IDENTITY_AMBIGUOUS: multiple identities exist for ${workspaceRoot}: ${JSON.stringify(prior.map(row => ({ slug: row.slug, id: row.id })))}. Restore project_id in .cogmemory/config.json; no memories were changed.`);
     }
-  };
-
-  ensureProjectsTable();
-
-  const findBySlug = db.prepare("SELECT * FROM projects WHERE slug = ?");
-  const touchStmt = db.prepare(
-    "UPDATE projects SET last_seen_at = datetime('now'), root_path_hint = ? WHERE id = ?",
-  );
-
-  const adopt = (
-    row: { id: number; slug: string; label: string | null },
-    isNewProject: boolean,
-  ): ProjectIdentity => {
-    touchStmt.run(rootHint, row.id);
-    return {
-      projectId: row.id,
-      slug: row.slug,
-      label: row.label ?? label,
-      isNewProject,
-    };
-  };
-
-  const existingSlug = readConfigFile(workspaceRoot).project_id;
-  if (existingSlug) {
-    const row = findBySlug.get(existingSlug) as
-      | {
-          id: number;
-          slug: string;
-          label: string | null;
-          root_path_hint: string | null;
-        }
-      | undefined;
-    if (row) {
-      // ADR-10: advisory when the slug's last-seen root diverges from the
-      // current root. Non-blocking — a legitimate rename/move is the common
-      // case, so we still touch root_path_hint to the new value.
-      if (row.root_path_hint) {
-        const oldBase = basename(resolve(row.root_path_hint));
-        const newBase = basename(rootHint);
-        if (oldBase !== newBase) {
-          console.error(
-            `[cogmemory] Warning: resolved slug ${row.slug.slice(0, 8)}… was last seen at "${oldBase}", current workspace is "${newBase}" — continuing, but if this is unexpected, run switch_project or clear .cogmemory/config.json`,
-          );
-        }
+    const slug = config.project_id ?? (prior.length === 1 ? prior[0].slug : randomUUID());
+    if (scope === "workspace" && rows.length && !rows.some(row => row.slug === slug)) {
+      throw new Error("PROJECT_IDENTITY_MISMATCH: workspace database contains a different project. Restore project_id from its projects table; no data was changed.");
+    }
+    const label = basename(workspaceRoot) || "workspace";
+    const result = db.transaction(() => {
+      let row = db.prepare("SELECT id, slug, label FROM projects WHERE slug = ?").get(slug) as typeof rows[number] | undefined;
+      let isNewProject = false;
+      if (!row && scope === "workspace" && rows.length === 0) {
+        db.prepare("UPDATE projects SET slug = ?, label = ? WHERE slug = 'legacy-unassigned'").run(slug, label);
+        row = db.prepare("SELECT id, slug, label FROM projects WHERE slug = ?").get(slug) as typeof row;
       }
-      return adopt(row, false);
-    }
-    console.error(
-      `[cogmemory] Slug ${existingSlug} from config.json not found in projects table — re-bootstrapping`,
-    );
-  }
-
-  // Workspace-scope DB: adopt the synthesized legacy row if it is still the
-  // only project — this preserves continuity for pre-migration workspaces.
-  if (scope === "workspace") {
-    const legacy = findBySlug.get("legacy-unassigned") as
-      | { id: number; slug: string; label: string | null }
-      | undefined;
-    const projectCount = (
-      db.prepare("SELECT COUNT(*) as cnt FROM projects").get() as {
-        cnt: number;
+      if (!row) {
+        db.prepare("INSERT INTO projects (slug, label, root_path_hint) VALUES (?, ?, ?) ON CONFLICT(slug) DO NOTHING")
+          .run(slug, label, workspaceRoot);
+        row = db.prepare("SELECT id, slug, label FROM projects WHERE slug = ?").get(slug) as typeof rows[number];
+        isNewProject = true;
       }
-    ).cnt;
-    if (legacy && projectCount === 1) {
-      const slug = randomUUID();
-      db.prepare(
-        "UPDATE projects SET slug = ?, label = ?, root_path_hint = ?, last_seen_at = datetime('now') WHERE id = ?",
-      ).run(slug, label, rootHint, legacy.id);
-      persistSlug(workspaceRoot, slug);
-      return {
-        projectId: legacy.id,
-        slug,
-        label,
-        isNewProject: false,
-      };
-    }
-  }
-
-  // Fresh project (or global scope): create a new slug.
-  const slug = randomUUID();
-  const result = db
-    .prepare(
-      "INSERT INTO projects (slug, label, root_path_hint) VALUES (?, ?, ?)",
-    )
-    .run(slug, label, rootHint);
-  persistSlug(workspaceRoot, slug);
-  return {
-    projectId: result.lastInsertRowid as number,
-    slug,
-    label,
-    isNewProject: true,
-  };
+      db.prepare("UPDATE projects SET last_seen_at = datetime('now'), root_path_hint = ? WHERE id = ?")
+        .run(workspaceRoot, row.id);
+      return { projectId: row.id, slug, label: row.label ?? label, isNewProject };
+    }).immediate();
+    if (config.project_id !== slug) writeConfigFile(workspaceRoot, { ...config, project_id: slug });
+    return result;
+  });
 }

@@ -2,9 +2,8 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type Database from "better-sqlite3";
-import { wrapHandler, projectPredicate } from "./utils.js";
-import type { ActiveProjectRef } from "../active-project.js";
+import { wrapProjectHandler, projectSchema, projectPredicate } from "./utils.js";
+import type { ProjectRuntime } from "../active-project.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -48,8 +47,7 @@ export const UpdateSpecSchema = z.object({
 
 export function registerSpecsTools(
   server: McpServer,
-  db: Database.Database,
-  activeProject: ActiveProjectRef,
+  runtime: ProjectRuntime,
 ): void {
   // ── create_spec ──
   server.registerTool(
@@ -57,12 +55,11 @@ export function registerSpecsTools(
     {
       description:
         "Store a long-form document (PRD, SRS, design doc), optionally linked to a knowledge graph entity",
-      inputSchema: CreateSpecSchema,
+      inputSchema: projectSchema(CreateSpecSchema),
     },
-    wrapHandler(
-      "create_spec",
-      async ({ title, content, format, entity_id }) => {
-        const projectId = activeProject.get();
+    wrapProjectHandler(
+      runtime, "create_spec",
+      async ({ title, content, format, entity_id }, { db, projectId }) => {
         // Validate entity_id if provided (and belongs to this project)
         if (entity_id !== undefined) {
           const entity = db
@@ -118,10 +115,9 @@ export function registerSpecsTools(
     "get_spec",
     {
       description: "Retrieve a spec by ID or exact title",
-      inputSchema: GetSpecSchema,
+      inputSchema: projectSchema(GetSpecSchema),
     },
-    wrapHandler("get_spec", async ({ id, title }) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "get_spec", async ({ id, title }, { db, projectId }) => {
       let spec: Record<string, unknown> | undefined;
 
       if (id !== undefined) {
@@ -167,10 +163,9 @@ export function registerSpecsTools(
     {
       description:
         "Update a spec's content, title, or entity link (auto-bumps version)",
-      inputSchema: UpdateSpecSchema,
+      inputSchema: projectSchema(UpdateSpecSchema),
     },
-    wrapHandler("update_spec", async ({ id, content, title, entity_id }) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "update_spec", async ({ id, content, title, entity_id }, { db, projectId }) => {
       // Fetch current spec (scoped to the active project)
       const current = db
         .prepare(`SELECT * FROM specs WHERE id = ? AND ${projectPredicate()}`)

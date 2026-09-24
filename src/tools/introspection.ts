@@ -3,10 +3,9 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler, jsonOk, projectPredicate } from "./utils.js";
+import { wrapProjectHandler, projectSchema, jsonOk, projectPredicate } from "./utils.js";
 import { VERSION } from "../version.js";
-import type { ResolutionSource, Scope } from "../config.js";
-import type { ActiveProjectRef } from "../active-project.js";
+import type { ProjectRuntime } from "../active-project.js";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -146,11 +145,7 @@ function computeIndexCoverage(
 
 export function registerIntrospectionTools(
   server: McpServer,
-  db: Database.Database,
-  workspaceRoot: string,
-  activeProject: ActiveProjectRef,
-  resolutionSource: ResolutionSource,
-  scope: Scope,
+  runtime: ProjectRuntime,
 ): void {
   // ── cogmemory_status ──
   server.registerTool(
@@ -158,15 +153,14 @@ export function registerIntrospectionTools(
     {
       description:
         "Show runtime configuration: package version, schema version, db path, workspace root, scope, index coverage, and subsystem counts. Use this to understand the current state of CogMemory.",
-      inputSchema: z.object({
+      inputSchema: projectSchema(z.object({
         verbose: z
           .boolean()
           .optional()
           .describe("Include per-subsystem row counts (default: false)"),
-      }),
+      })),
     },
-    wrapHandler("cogmemory_status", async ({ verbose }) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "cogmemory_status", async ({ verbose }, { db, workspaceRoot, scope, resolutionSource, projectId }) => {
       const rootPathHint =
         (
           db
@@ -243,9 +237,9 @@ export function registerIntrospectionTools(
     {
       description:
         "Check if a newer version of cogmemory-mcp is available on npm. Makes a read-only HTTPS GET to registry.npmjs.org (cached 24h). Disable with COGMEMORY_DISABLE_UPDATE_CHECK=1 or config.json disable_update_check=true.",
-      inputSchema: z.object({}),
+      inputSchema: projectSchema(z.object({})),
     },
-    wrapHandler("check_for_updates", async () => {
+    wrapProjectHandler(runtime, "check_for_updates", async (_params, { db, workspaceRoot, projectId }) => {
       if (isUpdateCheckDisabled(workspaceRoot)) {
         return jsonOk({
           current_version: VERSION,
@@ -260,7 +254,7 @@ export function registerIntrospectionTools(
       try {
         const cached = db
           .prepare("SELECT value FROM context WHERE key = ? AND project_id = ?")
-          .get(CACHE_KEY, activeProject.get()) as { value: string } | undefined;
+          .get(CACHE_KEY, projectId) as { value: string } | undefined;
 
         if (cached) {
           const parsed = JSON.parse(cached.value);
@@ -311,7 +305,7 @@ export function registerIntrospectionTools(
              VALUES (?, ?, ?, datetime('now'))
              ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`,
           ).run(
-            activeProject.get(),
+            projectId,
             CACHE_KEY,
             JSON.stringify({ latest, timestamp: Date.now() }),
           );

@@ -4,13 +4,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { VERSION } from "./version.js";
-import {
-  resolveConfig,
-  resolveWorkspaceRoot,
-  resolveProjectIdentity,
-} from "./config.js";
-import { createActiveProjectRef } from "./active-project.js";
-import { openDatabase, closeDatabase } from "./db/connection.js";
+import { resolveWorkspaceRoot } from "./config.js";
+import { ProjectRuntime } from "./active-project.js";
+import { closeDatabase } from "./db/connection.js";
 import { registerSessionTools } from "./tools/sessions.js";
 import { registerMemoryTools } from "./tools/memory.js";
 import { registerPlanTasksTools } from "./tools/plan-tasks.js";
@@ -30,18 +26,14 @@ async function main(): Promise<void> {
   // signal; explicit --workspace / COGMEMORY_WORKSPACE still wins — ADR-7)
   const { root: workspaceRoot, source: resolutionSource } =
     resolveWorkspaceRoot(process.argv);
-  const config = resolveConfig(workspaceRoot);
 
   // Lightweight update check (fail-safe, stderr-only, 24h interval cache).
   // Runs before the DB opens so the notification prints ahead of migration logs.
   runStartupUpdateCheck(workspaceRoot);
 
-  // Open database (runs migration on first open)
-  const db = openDatabase(config.dbPath);
-
-  // Resolve project identity (slug in .cogmemory/config.json + projects table row)
-  const project = resolveProjectIdentity(workspaceRoot, db, config.scope);
-  const activeProject = createActiveProjectRef(project.projectId);
+  const runtime = new ProjectRuntime(workspaceRoot, resolutionSource);
+  const config = runtime.current;
+  const project = runtime.current;
 
   // Ensure cleanup on exit
   process.on("SIGINT", () => {
@@ -59,32 +51,18 @@ async function main(): Promise<void> {
     version: VERSION,
   });
 
-  // Register all tools (every tool reads the active project ref at call time)
-  registerSessionTools(server, db, activeProject);
-  registerMemoryTools(server, db, activeProject);
-  registerPlanTasksTools(server, db, activeProject);
-  registerKnowledgeGraphTools(server, db, activeProject);
-  registerSpecsTools(server, db, activeProject);
-  registerCodeGraphTools(server, db, workspaceRoot, activeProject);
-  registerCodemapTools(server, db, activeProject);
-  registerListDeleteTools(server, db, activeProject);
-  registerIntrospectionTools(
-    server,
-    db,
-    workspaceRoot,
-    activeProject,
-    resolutionSource,
-    config.scope,
-  );
-  registerCodeAnalysisTools(server, db, workspaceRoot, activeProject);
-  registerProjectTools(
-    server,
-    db,
-    activeProject,
-    workspaceRoot,
-    config.scope,
-    resolutionSource,
-  );
+  // Each handler captures one consistent context at call time.
+  registerSessionTools(server, runtime);
+  registerMemoryTools(server, runtime);
+  registerPlanTasksTools(server, runtime);
+  registerKnowledgeGraphTools(server, runtime);
+  registerSpecsTools(server, runtime);
+  registerCodeGraphTools(server, runtime);
+  registerCodemapTools(server, runtime);
+  registerListDeleteTools(server, runtime);
+  registerIntrospectionTools(server, runtime);
+  registerCodeAnalysisTools(server, runtime);
+  registerProjectTools(server, runtime);
 
   // Log to stderr (stdio transport uses stdout for protocol)
   console.error(

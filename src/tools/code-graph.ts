@@ -11,8 +11,8 @@ import {
 import { resolve } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { wrapHandler, jsonOk, projectPredicate } from "./utils.js";
-import type { ActiveProjectRef } from "../active-project.js";
+import { wrapProjectHandler, projectSchema, jsonOk, projectPredicate } from "./utils.js";
+import type { ProjectRuntime } from "../active-project.js";
 // EDGE_TYPES and STRUCTURAL_EDGE_TYPES are imported but not used in this file
 // They were previously used for validation but are no longer needed
 
@@ -788,9 +788,7 @@ export const QueryCodeGraphSchema = z
 
 export function registerCodeGraphTools(
   server: McpServer,
-  db: Database.Database,
-  workspaceRoot: string,
-  activeProject: ActiveProjectRef,
+  runtime: ProjectRuntime,
 ): void {
   // ── index_codebase ──
   server.registerTool(
@@ -798,10 +796,9 @@ export function registerCodeGraphTools(
     {
       description:
         "Walk the workspace and extract symbols + edges. Dispatches files to the correct language analyzer automatically via the analyzer registry. Incremental by default (only re-analyzes changed files); use full=true to force complete re-index.",
-      inputSchema: IndexCodebaseSchema,
+      inputSchema: projectSchema(IndexCodebaseSchema),
     },
-    async ({ root_dir, extensions, full }) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "index_codebase", async ({ root_dir, extensions, full }, { db, workspaceRoot, projectId }) => {
       const targetDir = resolve(root_dir ?? workspaceRoot);
       const exts = extensions ?? getDefaultExtensions();
 
@@ -895,7 +892,7 @@ export function registerCodeGraphTools(
           isError: true,
         };
       }
-    },
+    }),
   );
 
   // ── query_code_graph ──
@@ -904,12 +901,11 @@ export function registerCodeGraphTools(
     {
       description:
         "Look up a symbol by name, ID, or file path — returns its callers, callees, and imports (1-hop)",
-      inputSchema: QueryCodeGraphSchema,
+      inputSchema: projectSchema(QueryCodeGraphSchema),
     },
-    wrapHandler(
-      "query_code_graph",
-      async ({ symbol_name, symbol_id, file_path }) => {
-        const projectId = activeProject.get();
+    wrapProjectHandler(
+      runtime, "query_code_graph",
+      async ({ symbol_name, symbol_id, file_path }, { db, projectId }) => {
         let symbol: Record<string, unknown> | undefined;
 
         if (symbol_id !== undefined) {

@@ -5,8 +5,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler, jsonOk, projectPredicate } from "./utils.js";
-import type { ActiveProjectRef } from "../active-project.js";
+import { wrapProjectHandler, projectSchema, jsonOk, projectPredicate } from "./utils.js";
+import type { ProjectRuntime } from "../active-project.js";
 import { walkFilesWithMtime } from "../indexing/walker.js";
 import { EDGE_TYPES, STRUCTURAL_EDGE_TYPES } from "../indexing/edge-types.js";
 import { readFileSync, existsSync } from "node:fs";
@@ -234,29 +234,8 @@ function detectLanguage(ext: string): string {
 
 export function registerCodeAnalysisTools(
   server: McpServer,
-  db: Database.Database,
-  workspaceRoot: string,
-  activeProject: ActiveProjectRef,
+  runtime: ProjectRuntime,
 ): void {
-  const hasBodyHash = hasColumn(db, "symbols", "body_hash");
-  const hasIsExported = hasColumn(db, "symbols", "is_exported");
-  const hasMetadata = hasColumn(db, "edges", "metadata");
-  const hasMinhash = (() => {
-    try {
-      db.prepare("SELECT 1 FROM symbol_minhash LIMIT 0").get();
-      return true;
-    } catch {
-      return false;
-    }
-  })();
-  const hasTokens = (() => {
-    try {
-      db.prepare("SELECT 1 FROM symbol_tokens LIMIT 0").get();
-      return true;
-    } catch {
-      return false;
-    }
-  })();
 
   // ── get_code_snippet ──
   server.registerTool(
@@ -264,7 +243,7 @@ export function registerCodeAnalysisTools(
     {
       description:
         "Get the source code lines for a symbol by ID or name. Returns the file content between start_line and end_line, with optional context padding.",
-      inputSchema: z.object({
+      inputSchema: projectSchema(z.object({
         symbol_id: z.number().int().optional().describe("Symbol ID to fetch"),
         symbol_name: z
           .string()
@@ -283,17 +262,16 @@ export function registerCodeAnalysisTools(
           .max(50)
           .optional()
           .describe("Extra lines before/after (default: 0)"),
-      }),
+      })),
     },
-    wrapHandler(
-      "get_code_snippet",
+    wrapProjectHandler(
+      runtime, "get_code_snippet",
       async ({
         symbol_id,
         symbol_name,
         file_path,
         context_lines: ctxLines,
-      }) => {
-        const projectId = activeProject.get();
+      }, { db, workspaceRoot, projectId }) => {
         const padding = ctxLines ?? 0;
 
         let symbol: Record<string, unknown> | undefined;
@@ -380,7 +358,7 @@ export function registerCodeAnalysisTools(
     {
       description:
         "Report indexed vs. unindexed vs. stale files and per-language breakdowns. Use to understand how much of the workspace the code graph covers.",
-      inputSchema: z.object({
+      inputSchema: projectSchema(z.object({
         root_dir: z
           .string()
           .optional()
@@ -391,10 +369,9 @@ export function registerCodeAnalysisTools(
           .describe(
             "File extensions to check (default: ts,tsx,js,jsx,mjs,cjs,py)",
           ),
-      }),
+      })),
     },
-    wrapHandler("check_index_coverage", async ({ root_dir, extensions }) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "check_index_coverage", async ({ root_dir, extensions }, { db, workspaceRoot, projectId }) => {
       const targetDir = resolve(root_dir ?? workspaceRoot);
       const exts = extensions ?? ["ts", "tsx", "js", "jsx", "mjs", "cjs", "py"];
 
@@ -471,7 +448,7 @@ export function registerCodeAnalysisTools(
     {
       description:
         "Find symbols with zero inbound structural edges (calls, imports, extends, implements). Excludes exported symbols, configurable entry-point patterns, and test files.",
-      inputSchema: z.object({
+      inputSchema: projectSchema(z.object({
         entry_point_patterns: z
           .array(z.string())
           .optional()
@@ -501,10 +478,10 @@ export function registerCodeAnalysisTools(
           .int()
           .optional()
           .describe("Max results (default: 200)"),
-      }),
+      })),
     },
-    wrapHandler("find_dead_code", async (params) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "find_dead_code", async (params, { db, projectId }) => {
+      const hasIsExported = hasColumn(db, "symbols", "is_exported");
       const patterns = params.entry_point_patterns ?? [
         "main",
         "index",
@@ -580,7 +557,7 @@ export function registerCodeAnalysisTools(
     {
       description:
         "Multi-hop structural graph query using recursive CTE. Start from a symbol and traverse outbound/inbound/both through edges of specified types up to max_depth. Returns nodes and paths.",
-      inputSchema: z.object({
+      inputSchema: projectSchema(z.object({
         start_symbol: z
           .string()
           .min(1)
@@ -619,10 +596,9 @@ export function registerCodeAnalysisTools(
               .describe("Only include symbols whose file_path matches"),
           })
           .optional(),
-      }),
+      })),
     },
-    wrapHandler("query_graph", async (params) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "query_graph", async (params, { db, projectId }) => {
       const maxDepth = params.max_depth ?? 5;
       const direction = params.direction ?? "both";
       const types = params.edge_types ?? STRUCTURAL_EDGE_TYPES.slice();
@@ -744,7 +720,7 @@ export function registerCodeAnalysisTools(
     {
       description:
         "Analyze the impact of uncommitted changes. Auto-detects changed files via `git diff`, maps them to indexed symbols, and computes the reverse transitive caller closure. Returns impacted symbols with depth and path.",
-      inputSchema: z.object({
+      inputSchema: projectSchema(z.object({
         changed_files: z
           .array(z.string())
           .optional()
@@ -764,10 +740,9 @@ export function registerCodeAnalysisTools(
           .boolean()
           .optional()
           .describe("Include test files in results (default: false)"),
-      }),
+      })),
     },
-    wrapHandler("analyze_impact", async (params) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "analyze_impact", async (params, { db, workspaceRoot, projectId }) => {
       const maxDepth = params.max_depth ?? 5;
       const types = params.edge_types ?? [EDGE_TYPES.CALLS, EDGE_TYPES.IMPORTS];
       const includeTests = params.include_tests === true;
@@ -871,7 +846,7 @@ export function registerCodeAnalysisTools(
     {
       description:
         "Find duplicate/clone symbol pairs via exact body_hash match and MinHash similarity. Inserts SIMILAR_TO edges for pairs above threshold.",
-      inputSchema: z.object({
+      inputSchema: projectSchema(z.object({
         threshold: z
           .number()
           .min(0)
@@ -894,10 +869,19 @@ export function registerCodeAnalysisTools(
           .string()
           .optional()
           .describe("Only consider symbols whose file_path matches"),
-      }),
+      })),
     },
-    wrapHandler("find_duplicates", async (params) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "find_duplicates", async (params, { db, workspaceRoot, projectId }) => {
+      const hasBodyHash = hasColumn(db, "symbols", "body_hash");
+      const hasMetadata = hasColumn(db, "edges", "metadata");
+      const hasMinhash = (() => {
+        try {
+          db.prepare("SELECT 1 FROM symbol_minhash LIMIT 0").get();
+          return true;
+        } catch {
+          return false;
+        }
+      })();
       const threshold = params.threshold ?? 0.7;
       const minTokens = params.min_tokens ?? 10;
       const recompute = params.recompute === true;
@@ -991,7 +975,7 @@ export function registerCodeAnalysisTools(
     {
       description:
         "Find semantically-related symbols using structural heuristics: shared callers, shared imports, same file, existing SIMILAR_TO edges. Inserts SEMANTICALLY_RELATED edges.",
-      inputSchema: z.object({
+      inputSchema: projectSchema(z.object({
         symbol_name: z
           .string()
           .optional()
@@ -1018,10 +1002,10 @@ export function registerCodeAnalysisTools(
           .array(z.string())
           .optional()
           .describe("Edge types to consider for shared-neighbor scoring"),
-      }),
+      })),
     },
-    wrapHandler("find_related", async (params) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "find_related", async (params, { db, projectId }) => {
+      const hasMetadata = hasColumn(db, "edges", "metadata");
       const threshold = params.threshold ?? 0.3;
       const limit = params.limit ?? 10;
 
@@ -1204,7 +1188,7 @@ export function registerCodeAnalysisTools(
     {
       description:
         "Semantic/meaning-based code search using TF-IDF over symbol names and source code. Returns symbols ranked by relevance to the natural-language query.",
-      inputSchema: z.object({
+      inputSchema: projectSchema(z.object({
         query: z
           .string()
           .min(2)
@@ -1231,10 +1215,17 @@ export function registerCodeAnalysisTools(
           .string()
           .optional()
           .describe("Only search symbols of this type"),
-      }),
+      })),
     },
-    wrapHandler("semantic_code_search", async (params) => {
-      const projectId = activeProject.get();
+    wrapProjectHandler(runtime, "semantic_code_search", async (params, { db, workspaceRoot, projectId }) => {
+      const hasTokens = (() => {
+        try {
+          db.prepare("SELECT 1 FROM symbol_tokens LIMIT 0").get();
+          return true;
+        } catch {
+          return false;
+        }
+      })();
       const limit = params.limit ?? 20;
       const threshold = params.threshold ?? 0;
       const queryTokens = tokenize(params.query);

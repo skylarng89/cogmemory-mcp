@@ -4,15 +4,11 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
 import { existsSync, statSync } from "node:fs";
-import { resolve } from "node:path";
-import { wrapHandler, jsonOk } from "./utils.js";
+import { resolve, isAbsolute } from "node:path";
+import { wrapProjectHandler, projectSchema, jsonOk } from "./utils.js";
 import type { Project } from "../types.js";
-import {
-  resolveProjectIdentity,
-  type Scope,
-  type ResolutionSource,
-} from "../config.js";
-import type { ActiveProjectRef } from "../active-project.js";
+
+import type { ProjectRuntime } from "../active-project.js";
 
 // ─── Constants ───────────────────────────────────────────
 
@@ -86,6 +82,7 @@ export const PruneProjectSchema = z.object({
 export const SwitchProjectSchema = z.object({
   root_dir: z
     .string()
+    .refine(isAbsolute, "root_dir must be an absolute workspace path")
     .min(1)
     .describe(
       "Absolute path to the workspace root of the project to switch to (e.g. a git repository root)",
@@ -96,11 +93,7 @@ export const SwitchProjectSchema = z.object({
 
 export function registerProjectTools(
   server: McpServer,
-  db: Database.Database,
-  activeProject: ActiveProjectRef,
-  bootWorkspaceRoot: string,
-  scope: Scope,
-  resolutionSource?: ResolutionSource,
+  runtime: ProjectRuntime,
 ): void {
   // ── list_projects ──
   server.registerTool(
@@ -108,9 +101,9 @@ export function registerProjectTools(
     {
       description:
         "List all projects known to this CogMemory database, with row counts, last-seen timestamps, and staleness flags. The active project is marked.",
-      inputSchema: z.object({}),
+      inputSchema: projectSchema(z.object({})),
     },
-    wrapHandler("list_projects", async () => {
+    wrapProjectHandler(runtime, "list_projects", async (_params, { db, projectId }) => {
       const projects = db
         .prepare(
           "SELECT id, slug, label, root_path_hint, created_at, last_seen_at FROM projects ORDER BY last_seen_at DESC",
@@ -119,7 +112,7 @@ export function registerProjectTools(
 
       const enriched = projects.map((p) => ({
         ...p,
-        is_active: p.id === activeProject.get(),
+        is_active: p.id === projectId,
         is_stale: isStale(p.last_seen_at),
         row_counts: countProjectRows(db, p.id),
       }));
@@ -138,9 +131,9 @@ export function registerProjectTools(
     {
       description:
         "Rename a project's display label. The slug (identity) is immutable — renaming never affects memory continuity.",
-      inputSchema: RenameProjectSchema,
+      inputSchema: projectSchema(RenameProjectSchema),
     },
-    wrapHandler("rename_project", async ({ id, label }) => {
+    wrapProjectHandler(runtime, "rename_project", async ({ id, label }, { db }) => {
       const result = db
         .prepare("UPDATE projects SET label = ? WHERE id = ?")
         .run(label, id);
@@ -163,9 +156,9 @@ export function registerProjectTools(
     {
       description:
         "Permanently delete a project and ALL of its memories (decisions, conventions, errors, sessions, code graph, etc.). Requires confirm=true. Irreversible.",
-      inputSchema: PruneProjectSchema,
+      inputSchema: projectSchema(PruneProjectSchema),
     },
-    wrapHandler("prune_projects", async ({ id, confirm }) => {
+    wrapProjectHandler(runtime, "prune_projects", async ({ id, confirm }, { db, projectId }) => {
       if (!confirm) {
         return jsonOk({
           success: false,
@@ -173,7 +166,7 @@ export function registerProjectTools(
             "Pass confirm=true to prune_projects — this deletes the project and all of its rows",
         });
       }
-      const activeId = activeProject.get();
+      const activeId = projectId;
       if (id === activeId) {
         return jsonOk({
           success: false,
@@ -213,10 +206,10 @@ export function registerProjectTools(
     "switch_project",
     {
       description:
-        "Re-resolve the active project from a workspace root at runtime. Use when the MCP client pinned a stale --workspace/cwd that does not match the project being worked on (the agent can self-correct without restarting the server). Creates and persists a new project identity if the root has none.",
-      inputSchema: SwitchProjectSchema,
+        "Switch database, project identity, and workspace root together at runtime. Use when the MCP client pinned a stale --workspace/cwd that does not match the project being worked on (the agent can self-correct without restarting the server). Creates and persists a new project identity if the root has none.",
+      inputSchema: projectSchema(SwitchProjectSchema),
     },
-    wrapHandler("switch_project", async ({ root_dir }) => {
+    wrapProjectHandler(runtime, "switch_project", async ({ root_dir }, { workspaceRoot }) => {
       // Fail-closed: never mutate the active project on an invalid path.
       const target = resolve(root_dir);
       if (!existsSync(target) || !statSync(target).isDirectory()) {
@@ -227,8 +220,7 @@ export function registerProjectTools(
       }
 
       try {
-        const identity = resolveProjectIdentity(target, db, scope);
-        activeProject.set(identity.projectId);
+        const identity = runtime.switchTo(target);
         return jsonOk({
           success: true,
           message: `Active project is now "${identity.label}" [${identity.slug.slice(0, 8)}…] (root: ${target})`,
@@ -238,8 +230,11 @@ export function registerProjectTools(
             label: identity.label,
             is_new_project: identity.isNewProject,
           },
-          previous_boot_root: bootWorkspaceRoot,
-          boot_resolution_source: resolutionSource ?? null,
+          previous_workspace_root: workspaceRoot,
+          workspace_root: identity.workspaceRoot,
+          db_path: identity.dbPath,
+          scope: identity.scope,
+          resolution_source: identity.resolutionSource,
         });
       } catch (err) {
         return jsonOk({

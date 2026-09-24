@@ -3,8 +3,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type Database from "better-sqlite3";
-import { wrapHandler, projectPredicate } from "./utils.js";
-import type { ActiveProjectRef } from "../active-project.js";
+import { wrapProjectHandler, projectSchema, projectPredicate } from "./utils.js";
+import type { ProjectRuntime } from "../active-project.js";
 
 // ─── ZOD SCHEMAS ──────────────────────────────────────────
 
@@ -56,8 +56,7 @@ export const AnnotateSymbolSchema = z
 
 export function registerCodemapTools(
   server: McpServer,
-  db: Database.Database,
-  activeProject: ActiveProjectRef,
+  runtime: ProjectRuntime,
 ): void {
   // ── generate_codemap ──
   server.registerTool(
@@ -65,10 +64,10 @@ export function registerCodemapTools(
     {
       description:
         "BFS from an entry symbol through the code graph, returning a bounded subgraph with optional traces and annotations",
-      inputSchema: GenerateCodemapSchema,
+      inputSchema: projectSchema(GenerateCodemapSchema),
     },
-    wrapHandler(
-      "generate_codemap",
+    wrapProjectHandler(
+      runtime, "generate_codemap",
       async ({
         entry_symbol,
         max_hops,
@@ -76,8 +75,7 @@ export function registerCodemapTools(
         include_annotations,
         save_as_trace,
         trace_description,
-      }) => {
-        const projectId = activeProject.get();
+      }, { db, projectId }) => {
         const hops = max_hops ?? 3;
         const nodes = max_nodes ?? 50;
         const withAnnotations = include_annotations !== false;
@@ -185,12 +183,11 @@ export function registerCodemapTools(
     {
       description:
         "Attach narrative text to a symbol or execution trace (storage-only — the server never generates the text)",
-      inputSchema: AnnotateSymbolSchema,
+      inputSchema: projectSchema(AnnotateSymbolSchema),
     },
-    wrapHandler(
-      "annotate_symbol",
-      async ({ symbol_id, trace_id, annotation }) => {
-        const projectId = activeProject.get();
+    wrapProjectHandler(
+      runtime, "annotate_symbol",
+      async ({ symbol_id, trace_id, annotation }, { db, projectId }) => {
         // Validate symbol_id if provided
         if (symbol_id !== undefined) {
           const symbol = db
