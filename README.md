@@ -597,3 +597,51 @@ If the workspace is not a git repository, `analyze_impact` with auto-detection w
 ## License
 
 MIT
+
+
+## Release workflow and recovery
+
+`.github/workflows/publish.yml` runs four separate jobs:
+
+| Job | Work | Rerun behavior |
+| --- | --- | --- |
+| Build and verify / prepare recovery | Validate tag against `package.json`, synchronize registry metadata, build, run smoke and identity tests, and pack once | Uploads an artifact unique to this run attempt |
+| Publish npm | Verify artifact integrity, then publish the tarball with OIDC/provenance | Skips only an existing release with identical npm metadata and tarball integrity |
+| Publish MCP Registry | Wait for the exact npm version to be public, authenticate with OIDC, and register it | Verifies matching existing registrations; retries transient publication failures |
+| Release summary | Read actual job results and publication outputs | Reports failed/skipped jobs and distinguishes npm submission from confirmed availability |
+
+The pnpm store cache is keyed by the lockfile. `node_modules` is not shared between runners; approved native dependencies build on the build runner. The verified tarball, synchronized `server.json`, and release manifest are transferred as a 30-day workflow artifact, so rerunning only the MCP job does not rebuild or republish npm. The pinned MCP publisher archive is cached by version, OS, architecture, and checksum; the checksum is verified on every restore. That cache is saved before registration so a registry failure does not discard it.
+
+### Normal releases
+
+1. Commit the intended version and push its matching `vX.Y.Z` tag. The tag must match `package.json`; the workflow rejects mismatches.
+2. The build job runs both `smoke-test` and `test:identity`, records the source commit in package metadata, and packs the tested build.
+3. npm publication submits that tarball without rerunning lifecycle builds. A successful submission may still be processing.
+4. The MCP job checks the public npm version every 15 seconds for up to 10 minutes. Authentication errors or mismatched release contents fail immediately. Registry outages and transient MCP publication errors have bounded retries.
+
+Publishing permissions are restricted to the npm and MCP jobs. The workflow filename remains `publish.yml`, preserving the existing trusted-publisher workflow identity. Releases remain serialized to avoid overlapping updates to npm's `latest` tag.
+
+### Rerun a failed stage
+
+For runs using the new workflow, open the run in GitHub Actions and choose **Re-run failed jobs**, or rerun the **Publish MCP Registry** job specifically. Successful upstream jobs and their artifacts are reused. If the artifact has expired, start a new manual run instead. A complete rerun verifies an existing npm release rather than attempting to overwrite it; different contents for the same version fail safely.
+
+### Recover an older release, including v1.15.0
+
+Once this workflow change is on the default branch:
+
+1. Open **Actions → Publish Package → Run workflow**.
+2. Select the default branch for the workflow implementation.
+3. Enter the existing release tag, such as **v1.15.0**, and select **mcp-only**.
+4. Run the workflow. It loads the current release helpers, checks out the selected tag for metadata, and skips dependency installation, the package build, and npm publishing.
+
+MCP-only recovery verifies npm's package name, version, MCP name, repository, and `gitHead` against the selected tag before registering anything. It fails if the source commit cannot be verified. Old tagged `server.json` versions are synchronized from that tag's `package.json`. It does not move tags or change published packages. An existing MCP version with different metadata or an inactive status requires investigation rather than automatic replacement.
+
+Rerunning the original old workflow run still uses its original workflow definition. Use this manual recovery path to recover old runs with the new logic.
+
+### Local release-helper checks
+
+```bash
+node --test scripts/release.test.mjs
+```
+
+These tests use temporary artifacts and mocked registries/commands; they never publish. Tests cover visibility delays, request failures, existing versions, integrity mismatches, source-commit verification, retry bounds, and summary accuracy. Hosted OIDC and publication still require a real GitHub Actions run.

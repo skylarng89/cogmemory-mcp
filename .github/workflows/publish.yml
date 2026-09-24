@@ -4,79 +4,268 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag (for example v1.15.0)"
+        required: true
+        type: string
+      mode:
+        description: "Full release or register an already-published npm release"
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - mcp-only
 
 concurrency:
+  # Keep releases serialized so concurrent npm submissions do not race on latest.
   group: publish
   cancel-in-progress: false
 
 permissions:
-  contents: write # create tags
-  id-token: write # npm trusted publisher (OIDC) + MCP Registry OIDC
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  RELEASE_MODE: ${{ inputs.mode || 'full' }}
+  MCP_PUBLISHER_VERSION: v1.8.1
+  # Official v1.8.1 checksum for mcp-publisher_linux_amd64.tar.gz.
+  MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  build:
+    name: Build and verify / prepare recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.name }}
+      version: ${{ steps.metadata.outputs.version }}
+      status: ${{ steps.result.outputs.status }}
     steps:
-      - name: Checkout
+      # Manual recovery uses this workflow's helpers, even for older source tags.
+      - name: Checkout release automation
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          ref: ${{ github.workflow_sha }}
+          path: automation
+          persist-credentials: false
+
+      - name: Checkout immutable release source
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          path: source
+          persist-credentials: false
 
       - name: Setup pnpm
+        if: env.RELEASE_MODE == 'full'
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          package_json_file: source/package.json
+
+      - name: Setup Node.js with dependency cache
+        if: env.RELEASE_MODE == 'full'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+
+      - name: Setup Node.js for recovery
+        if: env.RELEASE_MODE == 'mcp-only'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Test release orchestration
+        run: node --test automation/scripts/release.test.mjs
+
+      - name: Validate tag and prepare registry metadata
+        id: metadata
+        run: node automation/scripts/release.mjs prepare source release-artifact "$RELEASE_TAG"
+
+      - name: Install dependencies including approved native builds
+        if: env.RELEASE_MODE == 'full'
+        working-directory: source
+        run: pnpm install --frozen-lockfile
+
+      - name: Build once
+        if: env.RELEASE_MODE == 'full'
+        working-directory: source
+        run: pnpm run build
+
+      - name: Verify package
+        if: env.RELEASE_MODE == 'full'
+        working-directory: source
+        run: |
+          pnpm run smoke-test
+          pnpm run test:identity
+
+      - name: Record source commit in the packed package
+        if: env.RELEASE_MODE == 'full'
+        run: node automation/scripts/release.mjs stamp-package source release-artifact
+
+      - name: Pack the verified build without rebuilding
+        if: env.RELEASE_MODE == 'full'
+        working-directory: source
+        run: npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/release-artifact"
+
+      - name: Record release tarball integrity
+        if: env.RELEASE_MODE == 'full'
+        run: node automation/scripts/release.mjs record-tarball release-artifact
+
+      - name: Name this attempt's immutable artifact
+        id: artifact
+        run: echo "name=release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: release-artifact/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Record preparation result
+        id: result
+        run: |
+          if [ "$RELEASE_MODE" = full ]; then
+            echo "status=build-and-tests-passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=metadata-only; npm will be verified" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish_npm:
+    name: Publish npm
+    needs: build
+    if: inputs.mode != 'mcp-only'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      status: ${{ steps.publish.outputs.status }}
+    steps:
+      - name: Checkout release automation
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: automation
+          persist-credentials: false
+
+      - name: Download verified release
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: release-artifact
+
+      - name: Setup Node.js for trusted publishing
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Publish tarball or verify existing npm version
+        id: publish
+        run: node automation/scripts/release.mjs npm release-artifact
+
+  publish_mcp:
+    name: Publish MCP Registry
+    needs: [build, publish_npm]
+    # A skipped npm job is expected for MCP-only recovery; other failures block it.
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success' &&
+          (needs.publish_npm.result == 'success' ||
+           (inputs.mode == 'mcp-only' && needs.publish_npm.result == 'skipped')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      status: ${{ steps.publish.outputs.status }}
+    steps:
+      - name: Checkout release automation
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: automation
+          persist-credentials: false
+
+      - name: Download release metadata
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: release-artifact
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
           node-version: 24
-          cache: pnpm
-          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Cache pinned MCP publisher archive
+        id: publisher-cache
+        uses: actions/cache/restore@v6.1.0
+        with:
+          path: ${{ runner.temp }}/mcp-publisher-cache
+          key: mcp-publisher-${{ runner.os }}-${{ runner.arch }}-${{ env.MCP_PUBLISHER_VERSION }}-${{ env.MCP_PUBLISHER_SHA256 }}
 
-      - name: Read version from package.json
-        id: version
+      - name: Download MCP publisher on cache miss
+        if: steps.publisher-cache.outputs.cache-hit != 'true'
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $VERSION"
+          mkdir -p "$RUNNER_TEMP/mcp-publisher-cache"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
+            "https://github.com/modelcontextprotocol/registry/releases/download/$MCP_PUBLISHER_VERSION/mcp-publisher_linux_amd64.tar.gz" \
+            --output "$RUNNER_TEMP/mcp-publisher-cache/mcp-publisher_linux_amd64.tar.gz"
 
-      - name: Build
-        run: pnpm run build
-
-      - name: Smoke test
-        run: pnpm run smoke-test
-
-      - name: Publish to npm (Trusted Publisher)
-        run: npm publish --provenance --access public
-
-      - name: Install mcp-publisher
+      - name: Verify and install pinned publisher
         run: |
-          curl --proto "=https" --tlsv1.2 -sSf -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          cd "$RUNNER_TEMP/mcp-publisher-cache"
+          echo "$MCP_PUBLISHER_SHA256  mcp-publisher_linux_amd64.tar.gz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/mcp-publisher-bin"
+          tar xzf mcp-publisher_linux_amd64.tar.gz -C "$RUNNER_TEMP/mcp-publisher-bin" mcp-publisher
+          echo "PUBLISHER_PATH=$RUNNER_TEMP/mcp-publisher-bin/mcp-publisher" >> "$GITHUB_ENV"
 
-      - name: Authenticate to MCP Registry (OIDC)
-        run: ./mcp-publisher login github-oidc
+      # Save before publication so a later registry failure does not discard the cache.
+      - name: Save verified publisher archive
+        if: steps.publisher-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6.1.0
+        with:
+          path: ${{ runner.temp }}/mcp-publisher-cache
+          key: ${{ steps.publisher-cache.outputs.cache-primary-key }}
 
-      - name: Publish to MCP Registry
-        run: ./mcp-publisher publish
+      - name: Wait for npm and register or verify MCP version
+        id: publish
+        run: node automation/scripts/release.mjs mcp release-artifact
 
-      - name: Summary
-        if: always()
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
+  summary:
+    name: Release summary
+    needs: [build, publish_npm, publish_mcp]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout release automation
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: automation
+          persist-credentials: false
 
-          {
-            echo "## 📦 Publish Summary"
-            echo ""
-            echo "**Result:** Published \`v${VERSION}\`"
-            echo ""
-            echo "| Target | Status |"
-            echo "|--------|--------|"
-            echo "| npm | ✅ Published |"
-            echo "| MCP Registry | ✅ Published |"
-            echo "| Git tag | ✅ \`v${VERSION}\` |"
-            echo ""
-            echo "**Version source:** \`package.json\` (single source of truth)"
-            echo "**Commit:** \`${GITHUB_SHA::7}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Report actual job outcomes
+        env:
+          RELEASE_RESULTS: ${{ toJSON(needs) }}
+        run: node automation/scripts/release.mjs summary
